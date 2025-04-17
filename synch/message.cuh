@@ -7,7 +7,8 @@ enum MessageType {
 }
 
 struct Message {
-    MessageType MessageType;
-    int sender_id;
-    int data;
+    // MessageType MessageType;
+    // int sender_id;
+    // int data;
+    int counter_idx;
 }
