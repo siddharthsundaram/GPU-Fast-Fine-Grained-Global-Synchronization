@@ -18,9 +18,9 @@ struct Buffer {
 //     return b->write_idx < b->read_idx;
 // }
 
-// __device__ bool isEmpty(Buffer *b) {
-//     return b->write_idx == b->read_idx;
-// }
+__device__ bool isEmpty(Buffer *b) {
+    return b->write_idx == b->read_idx;
+}
 
 __device__ bool enqueue(Buffer *b, Message msg) {
     int current, next;
@@ -53,10 +53,17 @@ __device__ bool dequeue(Buffer *b, Message *out_msg) {
         // Check if buffer is empty
         if (current == b->write_idx)
             return false;
-            
-        next = (current + 1) % SIZE;
+
+        // check to see valid bitmask pos
+        if (!b->bitmask[current])
+            return false;
+        
+        next = (current + 1) % BUF_CAP;
     } while (atomicCAS(&b->read_idx, current, next) != current);
     
     *out_msg = b->buf[current];
+    // free the bitmask
+    b->bitmask[current] = 0;
+    __threadfence(); // ensure visibility of the bitmask change
     return true;
 }

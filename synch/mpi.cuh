@@ -28,8 +28,10 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
     int num_clients = total_threads - (num_server_blocks * blockDim.x);
     
     if (is_server) {
+
+        // TODO: Possibly move this to a separate kernel
         // do server stuff
-        extern __shared__ int locks[num_counters];
+        extern __shared__ int locks[];
         for (int i = tid; i < num_counters; i += blockDim.x) {
             locks[i] = 0;
         }
@@ -42,16 +44,19 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
 
             // receive_msg
             Message msg;
-            dequeue(my_buf, &msg);
 
-            // Acquire lock in shmem
-            while (atomicCAS(&locks[msg.counter_idx], 0, 1) != 0);
+            // TODO: Need to check dequeue return val
+            if (dequeue(my_buf, &msg)) {
 
-            // Critical section: increment counter
-            counters[msg.counter_idx] += 1;
+                // Acquire lock in shmem
+                while (atomicCAS(&locks[msg.counter_idx], 0, 1) != 0);
 
-            // Release lock
-            atomicExch(&locks[msg.counter_idx], 0);
+                // Critical section: increment counter
+                counters[msg.counter_idx] += 1;
+
+                // Release lock
+                atomicExch(&locks[msg.counter_idx], 0);
+            }
 
             if (sent >= num_clients && isEmpty(my_buf)) {
                 break;
