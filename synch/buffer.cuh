@@ -5,7 +5,7 @@
 
 struct Buffer {
     struct Message buf[BUF_CAP];
-    bool bitmask[BUF_CAP];
+    int bitmask[BUF_CAP];
     int write_idx;
     int read_idx;
 };
@@ -39,7 +39,8 @@ __device__ bool enqueue(Buffer *b, Message msg) {
     
     // Signal that this slot has valid data
     __threadfence();
-    b->bitmask[current] = 1;
+    // b->bitmask[current] = 1;
+    atomicExch(&b->bitmask[current], 1);
     
     return true;
 }
@@ -55,7 +56,7 @@ __device__ bool dequeue(Buffer *b, Message *out_msg) {
             return false;
 
         // check to see valid bitmask pos
-        if (!b->bitmask[current])
+        if (atomicAdd(&b->bitmask[current], 0) == 0)
             return false;
         
         next = (current + 1) % BUF_CAP;
@@ -63,7 +64,7 @@ __device__ bool dequeue(Buffer *b, Message *out_msg) {
     
     *out_msg = b->buf[current];
     // free the bitmask
-    b->bitmask[current] = 0;
+    atomicExch(&b->bitmask[current], 0);
     __threadfence(); // ensure visibility of the bitmask change
     return true;
 }

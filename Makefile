@@ -8,7 +8,7 @@ CUDA_OBJS = $(CUDASRC:.cu=.o)
 
 EXE = fine_grain_synch
 
-all: $(EXE)
+all: clean $(EXE)
 
 %.o: %.cu
 	$(NVCC) $(NVCCFLAGS) -o $@ -c $<
@@ -18,3 +18,6 @@ $(EXE): $(CUDA_OBJS)
 
 test:
 	./fine_grain_synch inputs/test0
+
+clean:
+	rm -f main.o

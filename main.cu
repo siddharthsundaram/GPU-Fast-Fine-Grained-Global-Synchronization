@@ -18,7 +18,7 @@
 
 int main(int argc, char **argv) {
     // parse_args(argc, argv);
-    char *input_file = argv[1];
+    char *input_file = argv[1]; 
 
     // if (true) {
     //     sequential(input_file);
@@ -36,6 +36,12 @@ int main(int argc, char **argv) {
 
     int num_increments = 0;
     fscanf(file, "%d", &num_increments);
+
+    int num_clients = 0;
+    fscanf(file, "%d", &num_clients);
+
+    int num_servers = 0;
+    fscanf(file, "%d", &num_servers);
 
     fclose(file);
 
@@ -55,7 +61,9 @@ int main(int argc, char **argv) {
     
     // CHECK(cudaMemcpy(h_shared_data, d_shared_data, size * sizeof(int), cudaMemcpyDeviceToHost));
 
-    gpu_buffer(size, num_increments);
+    printf("NUM COUNTERS: %i\n", size);
+    printf("NUM INCREMENTS: %i\n", num_increments);
+    gpu_buffer(size, num_servers, num_clients);
 
     // for (int i = 0; i < size; i++) {
     //     printf("shared_data[%d] = %d\n", i, h_shared_data[i]);
@@ -68,9 +76,9 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-void gpu_buffer(int size, int num_servers) {
+void gpu_buffer(int size, int num_servers, int num_clients) {
     int *h_locks = new int[size]();
-    int *h_shared_data = new int[size]();
+    int *h_shared_data = new int[size](); 
     int *d_shared_data, *d_done;
     Buffer *d_bufs;
     // CHECK(cudaMalloc(&d_locks, size * sizeof(int)));
@@ -82,18 +90,27 @@ void gpu_buffer(int size, int num_servers) {
     // CHECK(cudaMemcpy(d_locks, h_locks, size * sizeof(int), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_shared_data, h_shared_data, size * sizeof(int), cudaMemcpyHostToDevice));
 
-    dim3 block_size (std::min(size, 1024));
-    dim3 grid_size ((size + block_size.x - 1) / block_size.x);
-    int shared_mem_size = num_servers * size * sizeof(int);
-    counters_client_and_server_entry<<<4, 1024, shared_mem_size>>>(d_shared_data, size, num_servers, d_bufs, d_done);
+    dim3 block_size (std::min(num_clients, 256));
+    dim3 grid_size ((num_clients + block_size.x - 1) / block_size.x + num_servers);
+    printf("NUM CLIENTS: %i\n", num_clients);
+    printf("BLOCK SIZE: %i\n", block_size);
+    printf("GRID SIZE: %i\n", grid_size); 
+    int shared_mem_size = num_servers * size * sizeof(int); 
+    counters_client_and_server_entry<<<4, 1024, shared_mem_size>>>(d_shared_data, size, num_servers, d_bufs, d_done, num_clients);
 
     CHECK(cudaDeviceSynchronize());
     
     CHECK(cudaMemcpy(h_shared_data, d_shared_data, size * sizeof(int), cudaMemcpyDeviceToHost));
+
+    CHECK(cudaDeviceSynchronize());
     
+    int total = 0;
     for (int i = 0; i < size; i++) {
-        printf("shared_data[%d] = %d\n", i, h_shared_data[i]);
+        printf("shared_data[%d] = %d\n", i, h_shared_data[i]); 
+        total += h_shared_data[i];
     }
+
+    printf("TOTAL: %d\n", total);
 }
 
 __device__ bool try_lock(int data_id, int *locks) {
