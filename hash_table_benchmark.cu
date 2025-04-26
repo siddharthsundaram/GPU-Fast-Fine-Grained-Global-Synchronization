@@ -1,12 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <chrono>     // Using chrono for timing
+#include <iostream>   // Added for std::cout and std::cerr
 #include <cuda_runtime.h>
 #include <string.h>
 #include <unistd.h> 
 #include "synch/buffer.cuh"
 #include "synch/message.cuh"
 #include "synch/mpi.cuh"
+#include <boost/program_options.hpp> // Added for argument parsing
+
+namespace bpo = boost::program_options;
 
 #define CHECK(call)                                                            \
     {                                                                          \
@@ -30,11 +35,11 @@
 #define CF_32K 32768
 #define CF_128K 131072
 
-// Timer utilities
+// Timer utilities using chrono instead of timespec
 double get_time() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
+    auto now = std::chrono::high_resolution_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration<double>(duration).count();
 }
 
 // Structure for hash table nodes (linked list)
@@ -379,73 +384,93 @@ int main(int argc, char** argv) {
     int num_clients = 16 * BLOCK_SIZE; // Number of client threads
     int collision_factor = CF_1K;  // Default collision factor
     
-    // Parse command line arguments
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-cf") == 0 && i+1 < argc) {
-            // Collision factor
-            int cf = atoi(argv[++i]);
-            if (cf == 256) collision_factor = CF_256;
-            else if (cf == 1024) collision_factor = CF_1K;
-            else if (cf == 32768) collision_factor = CF_32K;
-            else if (cf == 131072) collision_factor = CF_128K;
-            else printf("Warning: Invalid collision factor. Using default.\n");
-        } else if (strcmp(argv[i], "-n") == 0 && i+1 < argc) {
-            // Number of operations
-            num_operations = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-s") == 0 && i+1 < argc) {
-            // Number of servers
-            num_servers = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-c") == 0 && i+1 < argc) {
-            // Number of clients
-            num_clients = atoi(argv[++i]);
-        } else {
-            printf("Usage: %s [-cf collision_factor] [-n num_operations] [-s num_servers] [-c num_clients]\n", argv[0]);
-            printf("  collision_factor: 256, 1024, 32768, or 131072\n");
-            return 1;
+    // Using boost program options for argument parsing
+    try {
+        bpo::options_description desc("Hash Table Benchmark Options");
+        desc.add_options()
+            ("help", "Show help message")
+            ("cf", bpo::value<int>()->default_value(CF_1K), "Collision factor (256, 1024, 32768, or 131072)")
+            ("n", bpo::value<int>()->default_value(1000000), "Number of operations")
+            ("s", bpo::value<int>()->default_value(4), "Number of server blocks")
+            ("c", bpo::value<int>()->default_value(16 * BLOCK_SIZE), "Number of client threads")
+            ("all", "Run benchmarks with all collision factors");
+            
+        bpo::variables_map vm;
+        bpo::store(bpo::parse_command_line(argc, argv, desc), vm);
+        bpo::notify(vm);
+        
+        if (vm.count("help")) {
+            std::cout << desc << "\n";
+            return 0;
         }
-    }
-    
-    printf("Hash Table Benchmark\n");
-    printf("====================\n");
-    printf("Hash Table Size: %d buckets\n", HT_SIZE);
-    printf("Collision Factor: %d\n", collision_factor);
-    printf("Number of Operations: %d\n", num_operations);
-    printf("Number of Servers: %d\n", num_servers);
-    printf("Number of Clients: %d\n", num_clients);
-    printf("\n");
-    
-    // Run sequential benchmark
-    double seq_time = run_sequential_benchmark(collision_factor, num_operations);
-    printf("Sequential Time: %.4f seconds\n\n", seq_time);
-    
-    // Run CUDA benchmark
-    double cuda_time = run_cuda_benchmark(collision_factor, num_operations, num_servers, num_clients);
-    printf("CUDA Time: %.4f seconds\n\n", cuda_time);
-    
-    // Calculate speedup
-    printf("Speedup: %.2fx\n\n", seq_time / cuda_time);
-    
-    // Run all collision factors if not specified
-    if (argc <= 1) {
-        int collision_factors[] = {CF_256, CF_1K, CF_32K, CF_128K};
-        const char* cf_names[] = {"256", "1K", "32K", "128K"};
         
-        printf("\nBenchmarking all collision factors:\n");
-        printf("----------------------------------\n");
-        
-        for (int i = 0; i < 4; i++) {
-            if (collision_factors[i] != collision_factor) {
-                printf("\nCollision Factor: %s\n", cf_names[i]);
-                
-                double s_time = run_sequential_benchmark(collision_factors[i], num_operations);
-                printf("Sequential Time: %.4f seconds\n", s_time);
-                
-                double c_time = run_cuda_benchmark(collision_factors[i], num_operations, num_servers, num_clients);
-                printf("CUDA Time: %.4f seconds\n", c_time);
-                
-                printf("Speedup: %.2fx\n", s_time / c_time);
+        if (vm.count("cf")) {
+            int cf = vm["cf"].as<int>();
+            if (cf == CF_256 || cf == CF_1K || cf == CF_32K || cf == CF_128K) {
+                collision_factor = cf;
+            } else {
+                std::cout << "Warning: Invalid collision factor. Using default.\n";
             }
         }
+        
+        if (vm.count("n")) {
+            num_operations = vm["n"].as<int>();
+        }
+        
+        if (vm.count("s")) {
+            num_servers = vm["s"].as<int>();
+        }
+        
+        if (vm.count("c")) {
+            num_clients = vm["c"].as<int>();
+        }
+        
+        printf("Hash Table Benchmark\n");
+        printf("====================\n");
+        printf("Hash Table Size: %d buckets\n", HT_SIZE);
+        printf("Collision Factor: %d\n", collision_factor);
+        printf("Number of Operations: %d\n", num_operations);
+        printf("Number of Servers: %d\n", num_servers);
+        printf("Number of Clients: %d\n", num_clients);
+        printf("\n");
+        
+        // Run sequential benchmark
+        double seq_time = run_sequential_benchmark(collision_factor, num_operations);
+        printf("Sequential Time: %.4f seconds\n\n", seq_time);
+        
+        // Run CUDA benchmark
+        double cuda_time = run_cuda_benchmark(collision_factor, num_operations, num_servers, num_clients);
+        printf("CUDA Time: %.4f seconds\n\n", cuda_time);
+        
+        // Calculate speedup
+        printf("Speedup: %.2fx\n\n", seq_time / cuda_time);
+        
+        // Run all collision factors if specified
+        if (vm.count("all")) {
+            int collision_factors[] = {CF_256, CF_1K, CF_32K, CF_128K};
+            const char* cf_names[] = {"256", "1K", "32K", "128K"};
+            
+            printf("\nBenchmarking all collision factors:\n");
+            printf("----------------------------------\n");
+            
+            for (int i = 0; i < 4; i++) {
+                if (collision_factors[i] != collision_factor) {
+                    printf("\nCollision Factor: %s\n", cf_names[i]);
+                    
+                    double s_time = run_sequential_benchmark(collision_factors[i], num_operations);
+                    printf("Sequential Time: %.4f seconds\n", s_time);
+                    
+                    double c_time = run_cuda_benchmark(collision_factors[i], num_operations, num_servers, num_clients);
+                    printf("CUDA Time: %.4f seconds\n", c_time);
+                    
+                    printf("Speedup: %.2fx\n", s_time / c_time);
+                }
+            }
+        }
+    }
+    catch(std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
     }
     
     return 0;

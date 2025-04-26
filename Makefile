@@ -3,13 +3,16 @@ NVCC = nvcc
 CFLAGS = -std=c++17 -I/usr/include -I/lusr/cuda-12.2.2/include -L/lusr/cuda-12.2.2/lib64
 NVCCFLAGS = -std=c++17 -Xcompiler -fPIC -arch=sm_75 -I/lusr/cuda-12.2.2/include -L/lusr/cuda-12.2.2/lib64
 
+# Add boost libraries and standard C++ libraries
+LIBS = -lboost_program_options -lboost_system -lstdc++
+
 MAIN_SRC = main.cu
 MAIN_OBJ = $(MAIN_SRC:.cu=.o)
 HASH_TABLE_SRC = hash_table_benchmark.cu
 HASH_TABLE_OBJ = $(HASH_TABLE_SRC:.cu=.o)
 
 MAIN_EXE = fine_grain_synch
-HASH_TABLE_EXE = hash_table_bench
+HASH_TABLE_EXE = hash_table_benchmark
 
 all: clean $(MAIN_EXE) $(HASH_TABLE_EXE)
 
@@ -20,7 +23,7 @@ $(MAIN_EXE): $(MAIN_OBJ)
 	$(NVCC) -o $(MAIN_EXE) $(MAIN_OBJ)
 
 $(HASH_TABLE_EXE): $(HASH_TABLE_OBJ)
-	$(NVCC) -o $(HASH_TABLE_EXE) $(HASH_TABLE_OBJ)
+	$(NVCC) -o $(HASH_TABLE_EXE) $(HASH_TABLE_OBJ) $(LIBS)
 
 test:
 	./$(MAIN_EXE) inputs/test0
