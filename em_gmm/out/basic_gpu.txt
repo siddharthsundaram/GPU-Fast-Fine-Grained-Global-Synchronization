@@ -1,0 +1,51 @@
+# EM Algorithm Results
+# Number of components: 3
+# Number of dimensions: 2
+# Final log-likelihood: -3291.18
+# Number of iterations: 4
+# Time elapsed: 0.000849811 seconds
+# Error compared to ground truth: 0.637689
+
+Component 0:
+Weight: 0.298
+Mean: 21.1422, 0.587791
+Covariance:
+6.92285, -2.64372
+-2.64372, 1.42625
+
+Component 1:
+Weight: 0.284
+Mean: 29.041, 24.9951
+Covariance:
+1.92466, 1.1369
+1.1369, 0.903871
+
+Component 2:
+Weight: 0.418
+Mean: 26.0121, 18.05
+Covariance:
+0.393472, 0.448203
+0.448203, 0.61203
+
+# Ground Truth Components
+True Component 0:
+Weight: 0.405087
+Mean: 25.9853, 18.0335
+Covariance:
+0.40224, 0.454864
+0.454864, 0.612279
+
+True Component 1:
+Weight: 0.304252
+Mean: 21.2422, 0.617535
+Covariance:
+7.68934, -3.01122
+-3.01122, 1.57979
+
+True Component 2:
+Weight: 0.29066
+Mean: 29.0973, 24.9733
+Covariance:
+2.51542, 1.4324
+1.4324, 1.05586
+

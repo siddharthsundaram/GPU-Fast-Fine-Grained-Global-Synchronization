@@ -1,0 +1,105 @@
+# EM Algorithm Results
+# Number of components: 6
+# Number of dimensions: 3
+# Final log-likelihood: -566459
+# Number of iterations: 8
+# Time elapsed: 0.101705 seconds
+# Error compared to ground truth: 161.006
+
+Component 0:
+Weight: 0.406041
+Mean: 24.2916, 20.7294, 5.77126
+Covariance:
+469.144, 401.119, 93.0055
+401.119, 347.372, 80.111
+93.0055, 80.111, 27.0871
+
+Component 1:
+Weight: 0.30561
+Mean: 36.1387, 42.6661, 1.34551
+Covariance:
+1, 0, 0
+0, 1, 0
+0, 0, 1
+
+Component 2:
+Weight: 0.00313832
+Mean: 36.2324, 41.3256, 2.65174
+Covariance:
+1, 0, 0
+0, 1, 0
+0, 0, 1
+
+Component 3:
+Weight: 0.119721
+Mean: 35.2285, 41.2639, 1.02849
+Covariance:
+1, 0, 0
+0, 1, 0
+0, 0, 1
+
+Component 4:
+Weight: 0.102215
+Mean: 21.3383, 26.0936, 51.3545
+Covariance:
+1, 0, 0
+0, 1, 0
+0, 0, 1
+
+Component 5:
+Weight: 0.0632749
+Mean: 19.2596, 28.6751, 41.5551
+Covariance:
+1, 0, 0
+0, 1, 0
+0, 0, 1
+
+# Ground Truth Components
+True Component 0:
+Weight: 0.428214
+Mean: 36.0669, 42.4844, 1.23507
+Covariance:
+2.34082, 1.44284, 0.702589
+1.44284, 1.48824, 0.0430533
+0.702589, 0.0430533, 0.817903
+
+True Component 1:
+Weight: 0.371786
+Mean: 58.1946, 49.9466, 12.7403
+Covariance:
+4.55987, 1.31914, -3.82015
+1.31914, 2.22066, 0.050708
+-3.82015, 0.050708, 5.65314
+
+True Component 2:
+Weight: 0.0140751
+Mean: 10.9095, 11.0043, 18.2545
+Covariance:
+0.598074, -0.392478, -0.198748
+-0.392478, 2.80487, -1.67163
+-0.198748, -1.67163, 1.45777
+
+True Component 3:
+Weight: 0.0140727
+Mean: 31.4854, 25.9167, 17.4737
+Covariance:
+3.37163, 0.994655, -1.79479
+0.994655, 1.90533, -1.46253
+-1.79479, -1.46253, 1.67718
+
+True Component 4:
+Weight: 0.00496527
+Mean: 36.7112, 8.36963, 17.5287
+Covariance:
+1.30103, -0.56759, 1.62674
+-0.56759, 2.69936, -1.56517
+1.62674, -1.56517, 2.51477
+
+True Component 5:
+Weight: 0.166887
+Mean: 21.9817, 27.3642, 47.1106
+Covariance:
+1.56404, 0.941994, 0.0925516
+0.941994, 2.50745, -3.49325
+0.0925516, -3.49325, 9.9967
+
