@@ -8,7 +8,7 @@ LIBS = -lboost_program_options -lboost_system -lstdc++
 
 MAIN_SRC = main.cu
 MAIN_OBJ = $(MAIN_SRC:.cu=.o)
-HASH_TABLE_SRC = hash_table_benchmark.cu
+HASH_TABLE_SRC = hash_table.cu
 HASH_TABLE_OBJ = $(HASH_TABLE_SRC:.cu=.o)
 
 MAIN_EXE = fine_grain_synch

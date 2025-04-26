@@ -1,15 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <chrono>     // Using chrono for timing
-#include <iostream>   // Added for std::cout and std::cerr
-#include <cuda_runtime.h>
-#include <string.h>
-#include <unistd.h> 
-#include "synch/buffer.cuh"
-#include "synch/message.cuh"
-#include "synch/mpi.cuh"
-#include <boost/program_options.hpp> // Added for argument parsing
+#include "hash_table.cuh"
 
 namespace bpo = boost::program_options;
 
@@ -25,9 +14,9 @@ namespace bpo = boost::program_options;
     }
 
 // Default hash table parameters
-#define HT_SIZE 1024                // Size of hash table (number of buckets)
-#define MAX_LIST_NODES 10000000     // Maximum number of nodes across all lists
-#define BLOCK_SIZE 256              // CUDA block size
+#define HT_SIZE 1024                
+#define MAX_LIST_NODES 10000000     
+#define BLOCK_SIZE 256              
 
 // Different collision factors for testing
 #define CF_256 256
@@ -35,7 +24,6 @@ namespace bpo = boost::program_options;
 #define CF_32K 32768
 #define CF_128K 131072
 
-// Timer utilities using chrono instead of timespec
 double get_time() {
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = now.time_since_epoch();
@@ -49,13 +37,11 @@ struct Node {
     Node* next;
 };
 
-// Sequential hash table
 struct HashTable {
     Node** buckets;
     int size;
 };
 
-// Create a sequential hash table
 HashTable* create_hash_table(int size) {
     HashTable* table = (HashTable*)malloc(sizeof(HashTable));
     table->size = size;
@@ -68,21 +54,17 @@ HashTable* create_hash_table(int size) {
     return table;
 }
 
-// Insert an element into the sequential hash table
 void insert(HashTable* table, int key, int value) {
     int bucket = key % table->size;
     
-    // Create new node
     Node* new_node = (Node*)malloc(sizeof(Node));
     new_node->key = key;
     new_node->value = value;
     
-    // Insert at beginning of list (for simplicity)
     new_node->next = table->buckets[bucket];
     table->buckets[bucket] = new_node;
 }
 
-// Free the sequential hash table
 void free_hash_table(HashTable* table) {
     for (int i = 0; i < table->size; i++) {
         Node* current = table->buckets[i];
@@ -100,7 +82,6 @@ void free_hash_table(HashTable* table) {
 double run_sequential_benchmark(int pool_size, int num_operations) {
     printf("Running sequential benchmark with pool size %d and %d operations\n", pool_size, num_operations);
     
-    // Create hash table
     HashTable* table = create_hash_table(HT_SIZE);
     
     // Create pool of elements for threads to randomly select from
@@ -117,11 +98,9 @@ double run_sequential_benchmark(int pool_size, int num_operations) {
         insert(table, element, i);
     }
     
-    // End timer
     double end_time = get_time();
     double elapsed_time = end_time - start_time;
     
-    // Count total nodes for verification
     int total_nodes = 0;
     for (int i = 0; i < table->size; i++) {
         Node* current = table->buckets[i];
@@ -149,14 +128,6 @@ struct GPUHashTable {
     int size;          // Number of buckets
 };
 
-// Message for hash table operation
-struct HashTableMessage {
-    int operation; // 0 = insert
-    int key;
-    int value;
-    int bucket;
-};
-
 // Hash table server kernel message handler
 __device__ void process_hash_table_msg(Message* msg, GPUHashTable* ht, int* locks) {
     int bucket = msg->counter_idx;
@@ -180,7 +151,7 @@ __device__ void process_hash_table_msg(Message* msg, GPUHashTable* ht, int* lock
     }
     
     // Release the lock
-    __threadfence(); // Ensure all updates are visible
+    __threadfence(); 
     atomicExch(&locks[bucket], 0);
 }
 
