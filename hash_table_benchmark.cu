@@ -1,0 +1,566 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
+#include <string.h>
+#include <unistd.h> 
+#include "synch/buffer.cuh"
+#include "synch/message.cuh"
+#include "synch/mpi.cuh"
+
+#define CHECK(call)                                                            \
+    {                                                                          \
+        const cudaError_t error = call;                                        \
+        if (error != cudaSuccess)                                              \
+        {                                                                      \
+            printf("Error: %s:%d, ", __FILE__, __LINE__);                      \
+            printf("code:%d, reason: %s\n", error, cudaGetErrorString(error)); \
+            exit(1);                                                           \
+        }                                                                      \
+    }
+
+// Default hash table parameters
+#define HT_SIZE 32                 // Reduced from 1024 for testing - will create more collisions
+#define MAX_LIST_NODES 10000000     // Maximum number of nodes across all lists
+#define BLOCK_SIZE 256              // CUDA block size
+
+// Different collision factors for testing
+#define CF_256 256
+#define CF_1K 1024
+#define CF_32K 32768
+#define CF_128K 131072
+
+// Timer utilities
+double get_time() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+// Structure for hash table nodes (linked list)
+struct Node {
+    int key;
+    int value;
+    Node* next;
+};
+
+// Sequential hash table
+struct HashTable {
+    Node** buckets;
+    int size;
+};
+
+// Create a sequential hash table
+HashTable* create_hash_table(int size) {
+    HashTable* table = (HashTable*)malloc(sizeof(HashTable));
+    table->size = size;
+    table->buckets = (Node**)malloc(sizeof(Node*) * size);
+    
+    for (int i = 0; i < size; i++) {
+        table->buckets[i] = NULL;
+    }
+    
+    return table;
+}
+
+// Insert an element into the sequential hash table
+void insert(HashTable* table, int key, int value) {
+    int bucket = key % table->size;
+    
+    // Create new node
+    Node* new_node = (Node*)malloc(sizeof(Node));
+    new_node->key = key;
+    new_node->value = value;
+    
+    // Insert at beginning of list (for simplicity)
+    new_node->next = table->buckets[bucket];
+    table->buckets[bucket] = new_node;
+}
+
+// Free the sequential hash table
+void free_hash_table(HashTable* table) {
+    for (int i = 0; i < table->size; i++) {
+        Node* current = table->buckets[i];
+        while (current != NULL) {
+            Node* temp = current;
+            current = current->next;
+            free(temp);
+        }
+    }
+    
+    free(table->buckets);
+    free(table);
+}
+
+double run_sequential_benchmark(int pool_size, int num_operations) {
+    printf("Running sequential benchmark with pool size %d and %d operations\n", pool_size, num_operations);
+    
+    // Create hash table
+    HashTable* table = create_hash_table(HT_SIZE);
+    
+    // Create deterministic pool of elements for threads to select from
+    int* element_pool = (int*)malloc(sizeof(int) * pool_size);
+    srand(42); // Fixed seed for reproducibility
+    for (int i = 0; i < pool_size; i++) {
+        element_pool[i] = rand() % 10000; // Limit the range for better readability
+    }
+    
+    double start_time = get_time();
+    
+    // Perform insertions
+    for (int i = 0; i < num_operations; i++) {
+        int idx = i % pool_size; // Deterministic selection instead of random
+        int element = element_pool[idx];
+        insert(table, element, i);
+    }
+    
+    // End timer
+    double end_time = get_time();
+    double elapsed_time = end_time - start_time;
+    
+    // Count total nodes for verification
+    int total_nodes = 0;
+    for (int i = 0; i < table->size; i++) {
+        Node* current = table->buckets[i];
+        while (current != NULL) {
+            total_nodes++;
+            current = current->next;
+        }
+    }
+    printf("Sequential hash table has %d nodes\n", total_nodes);
+    
+    // Output hash table contents for validation
+    printf("Sequential Hash Table Contents (first 20 buckets only):\n");
+    for (int i = 0; i < 20 && i < table->size; i++) {
+        printf("Bucket %d: ", i);
+        Node* current = table->buckets[i];
+        int count = 0;
+        while (current != NULL && count < 5) { // Limit to first 5 elements per bucket
+            printf("(%d,%d) ", current->key, current->value);
+            current = current->next;
+            count++;
+        }
+        if (current != NULL) printf("...");
+        printf("\n");
+    }
+    
+    // Save element pool to global array for CUDA implementation to use
+    FILE* fp = fopen("element_pool.dat", "wb");
+    if (fp) {
+        fwrite(element_pool, sizeof(int), pool_size, fp);
+        fclose(fp);
+    } else {
+        printf("Error: Unable to save element pool data\n");
+    }
+    
+    free(element_pool);
+    free_hash_table(table);
+    
+    return elapsed_time;
+}
+
+// Device-side hash table structure
+struct GPUHashTable {
+    int* locks;        // Lock for each bucket
+    int* next_indices; // Array to track next available node index
+    int* keys;         // Array of keys
+    int* values;       // Array of values
+    int* next_ptrs;    // Array of next pointers
+    int* bucket_heads; // Array of bucket head pointers
+    int size;          // Number of buckets
+};
+
+// Additional data for storing key-value pairs (since Message only has counter_idx)
+__device__ int* d_keys_array;
+__device__ int* d_values_array;
+
+// Kernel to prepare client messages using the same element pool as sequential benchmark
+__global__ void prepare_client_messages(int* element_pool, int pool_size, int num_operations, 
+                                      int num_servers, Buffer* bufs, int* done, int* keys, int* values) {
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    
+    if (tid < num_operations) {
+        int idx = tid % pool_size;
+        int key = element_pool[idx];
+        int value = tid;  // Use same insertion order as sequential version
+        
+        // Store the key and value for later retrieval
+        keys[tid] = key;
+        values[tid] = value;
+        
+        // Message only contains counter_idx
+        Message msg;
+        msg.counter_idx = tid;  // Use tid as identifier 
+        
+        int target_server = (key % HT_SIZE) % num_servers;
+        
+        // Attempt to enqueue message
+        Buffer* buf = &bufs[target_server];
+        int delay = 1000;
+        
+        while (!enqueue(buf, msg)) {
+            // If buffer is full, back off and retry
+            clock_t start = clock();
+            while (clock() - start < delay);
+            delay = min(delay * 2, 64000);
+        }
+        
+        // Increment message counter
+        atomicAdd(done, 1);
+    }
+}
+
+// Hash table server kernel message handler
+__device__ void process_hash_table_msg(Message* msg, GPUHashTable* ht, int* locks, int* keys, int* values) {
+    int msg_idx = msg->counter_idx;
+    int key = keys[msg_idx];
+    int value = values[msg_idx];
+    int bucket = key % ht->size;
+    
+    // Acquire lock for this bucket (using shared memory lock)
+    while (atomicCAS(&locks[bucket], 0, 1) != 0) {
+    }
+    
+    // Get next available node index
+    int idx = atomicAdd(&ht->next_indices[0], 1);
+    
+    if (idx < MAX_LIST_NODES) {
+        // Store key and value
+        ht->keys[idx] = key;
+        ht->values[idx] = value;
+        
+        // Update linked list (insert at head)
+        int old_head = ht->bucket_heads[bucket];
+        ht->next_ptrs[idx] = old_head;
+        ht->bucket_heads[bucket] = idx;
+    }
+    
+    // Release the lock
+    __threadfence(); // Ensure all updates are visible
+    atomicExch(&locks[bucket], 0);
+}
+
+// Modified server kernel for hash table operations
+__global__ void hash_table_server_kernel(int* counters, int num_counters, int num_server_blocks, 
+                                        Buffer* bufs, int* done, int num_threads,
+                                        GPUHashTable* hash_table, int* keys, int* values) {
+    bool is_server = blockIdx.x < num_server_blocks;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (is_server) {
+        // Initialize shared memory locks
+        extern __shared__ int locks[];
+        for (int i = threadIdx.x; i < num_counters; i += blockDim.x) {
+            locks[i] = 0;
+        }
+        
+        if (threadIdx.x == 0) {
+            printf("Hash Table Server %d initialized locks to 0 in shared memory\n", blockIdx.x);
+        }
+        
+        __syncthreads();
+        
+        Buffer* my_buf = &bufs[blockIdx.x];
+        int empty_iterations = 0;
+        const int MAX_EMPTY_ITERATIONS = 1000;
+        
+        while (true) {
+            int sent = atomicAdd(done, 0);
+            bool processed_message = false;
+            
+            // Check for messages in buffer
+            Message msg;
+            if (dequeue(my_buf, &msg)) {
+                process_hash_table_msg(&msg, hash_table, locks, keys, values);
+                processed_message = true;
+                empty_iterations = 0;
+            } else {
+                empty_iterations++;
+            }
+            
+            // Exit condition with safety check
+            if (sent >= num_threads) {
+                if (isEmpty(my_buf) || empty_iterations > MAX_EMPTY_ITERATIONS) {
+                    if (threadIdx.x == 0) {
+                        printf("Server %d exiting. done=%d, num_threads=%d, empty_iterations=%d\n", 
+                              blockIdx.x, sent, num_threads, empty_iterations);
+                    }
+                    break;
+                }
+            }
+            
+            // Add a small delay if no messages were processed
+            if (!processed_message) {
+                // Short sleep to reduce contention
+                for (int i = 0; i < 100; i++) { }
+            }
+        }
+    } else {
+        // Client threads now empty - client work happens in prepare_client_messages kernel
+        if (threadIdx.x == 0 && blockIdx.x == num_server_blocks) {
+            printf("Client thread block started\n");
+        }
+    }
+    
+    __syncthreads();
+}
+
+// Run CUDA hash table benchmark
+double run_cuda_benchmark(int pool_size, int num_operations, int num_servers, int num_clients) {
+    printf("Running CUDA benchmark with pool size %d and %d operations\n", pool_size, num_operations);
+    
+    // Load element pool from file (created by sequential benchmark)
+    int* element_pool = (int*)malloc(sizeof(int) * pool_size);
+    FILE* fp = fopen("element_pool.dat", "rb");
+    if (!fp) {
+        printf("Error: Could not load element pool data. Run sequential benchmark first.\n");
+        free(element_pool);
+        return -1.0;
+    }
+    size_t items_read = fread(element_pool, sizeof(int), pool_size, fp);
+    fclose(fp);
+    if (items_read != pool_size) {
+        printf("Error: Could not read all elements from pool file.\n");
+        free(element_pool);
+        return -1.0;
+    }
+    
+    // Allocate host memory
+    int* h_bucket_heads = (int*)malloc(sizeof(int) * HT_SIZE);
+    int* h_next_indices = (int*)malloc(sizeof(int));
+    h_next_indices[0] = 0; // First available slot
+    
+    for (int i = 0; i < HT_SIZE; i++) {
+        h_bucket_heads[i] = -1; // -1 indicates empty bucket
+    }
+    
+    // Allocate device memory for hash table
+    GPUHashTable h_table;
+    GPUHashTable* d_table;
+    
+    CHECK(cudaMalloc(&d_table, sizeof(GPUHashTable)));
+    CHECK(cudaMalloc(&h_table.locks, sizeof(int) * HT_SIZE));
+    CHECK(cudaMalloc(&h_table.next_indices, sizeof(int)));
+    CHECK(cudaMalloc(&h_table.keys, sizeof(int) * MAX_LIST_NODES));
+    CHECK(cudaMalloc(&h_table.values, sizeof(int) * MAX_LIST_NODES));
+    CHECK(cudaMalloc(&h_table.next_ptrs, sizeof(int) * MAX_LIST_NODES));
+    CHECK(cudaMalloc(&h_table.bucket_heads, sizeof(int) * HT_SIZE));
+    
+    h_table.size = HT_SIZE;
+    
+    // Initialize device memory
+    CHECK(cudaMemcpy(h_table.next_indices, h_next_indices, sizeof(int), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(h_table.bucket_heads, h_bucket_heads, sizeof(int) * HT_SIZE, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_table, &h_table, sizeof(GPUHashTable), cudaMemcpyHostToDevice));
+    
+    // Copy element pool to device
+    int* d_element_pool;
+    CHECK(cudaMalloc(&d_element_pool, sizeof(int) * pool_size));
+    CHECK(cudaMemcpy(d_element_pool, element_pool, sizeof(int) * pool_size, cudaMemcpyHostToDevice));
+    
+    // Allocate device memory for message passing
+    Buffer* d_bufs;
+    int* d_done;
+    int* d_shared_data;
+    int* d_keys;
+    int* d_values;
+    
+    CHECK(cudaMalloc(&d_shared_data, HT_SIZE * sizeof(int)));
+    CHECK(cudaMemset(d_shared_data, 0, HT_SIZE * sizeof(int)));
+    CHECK(cudaMalloc(&d_done, sizeof(int)));
+    CHECK(cudaMemset(d_done, 0, sizeof(int)));
+    CHECK(cudaMalloc(&d_bufs, num_servers * sizeof(Buffer)));
+    CHECK(cudaMalloc(&d_keys, sizeof(int) * num_operations));
+    CHECK(cudaMalloc(&d_values, sizeof(int) * num_operations));
+    
+    // Initialize buffers on host and copy to device
+    Buffer* h_bufs = (Buffer*)malloc(num_servers * sizeof(Buffer));
+    memset(h_bufs, 0, num_servers * sizeof(Buffer));
+    CHECK(cudaMemcpy(d_bufs, h_bufs, num_servers * sizeof(Buffer), cudaMemcpyHostToDevice));
+    free(h_bufs);
+    
+    // Calculate actual number of client threads
+    int client_threads_per_block = BLOCK_SIZE;
+    int total_client_threads = num_clients;
+    
+    // Start timer
+    printf("Launching kernel with %d server blocks and %d client threads...\n", 
+           num_servers, total_client_threads);
+    cudaDeviceSynchronize();
+    double start_time = get_time();
+    
+    // Launch client kernel to prepare messages with same values as sequential benchmark
+    prepare_client_messages<<<(total_client_threads + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+        d_element_pool, pool_size, num_operations, num_servers, d_bufs, d_done, d_keys, d_values);
+    
+    // Launch kernel
+    dim3 block_size(BLOCK_SIZE);
+    dim3 grid_size(num_servers + (num_clients + block_size.x - 1) / block_size.x);
+    int shared_mem_size = HT_SIZE * sizeof(int); // For locks
+    
+    printf("Grid size: %d, Block size: %d, Shared mem: %d bytes\n", 
+           grid_size.x, block_size.x, shared_mem_size);
+    
+    hash_table_server_kernel<<<grid_size, block_size, shared_mem_size>>>(
+        d_shared_data, HT_SIZE, num_servers, d_bufs, d_done, 
+        total_client_threads, d_table, d_keys, d_values);
+    
+    // Wait for kernel to complete with timeout
+    cudaError_t error = cudaSuccess;
+    for (int i = 0; i < 5; i++) {  // Try 5 times with increasing timeouts
+        error = cudaDeviceSynchronize();
+        if (error == cudaSuccess) break;
+        
+        printf("Warning: Synchronize timeout, retrying... (attempt %d/5)\n", i+1);
+        usleep(1000000);  // Wait 1 second before retrying (using microseconds)
+    }
+    
+    // End timer
+    double end_time = get_time();
+    double elapsed_time = end_time - start_time;
+    
+    if (error != cudaSuccess) {
+        printf("Error: Kernel execution failed or timed out: %s\n", cudaGetErrorString(error));
+        // Reset device to recover from errors
+        cudaDeviceReset();
+        return 999.0;  // Return an obviously invalid time
+    }
+    
+    // Copy results back to verify
+    int h_next_index;
+    CHECK(cudaMemcpy(&h_next_index, h_table.next_indices, sizeof(int), cudaMemcpyDeviceToHost));
+    printf("CUDA hash table has %d nodes\n", h_next_index);
+    
+    // Copy hash table data back for validation
+    int* h_keys = (int*)malloc(sizeof(int) * h_next_index);
+    int* h_values = (int*)malloc(sizeof(int) * h_next_index);
+    int* h_next_ptrs = (int*)malloc(sizeof(int) * h_next_index);
+    int* h_all_bucket_heads = (int*)malloc(sizeof(int) * HT_SIZE);
+    
+    CHECK(cudaMemcpy(h_keys, h_table.keys, sizeof(int) * h_next_index, cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_values, h_table.values, sizeof(int) * h_next_index, cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_next_ptrs, h_table.next_ptrs, sizeof(int) * h_next_index, cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_all_bucket_heads, h_table.bucket_heads, sizeof(int) * HT_SIZE, cudaMemcpyDeviceToHost));
+    
+    // Display CUDA hash table contents for first 20 buckets
+    printf("CUDA Hash Table Contents (first 20 buckets only):\n");
+    for (int i = 0; i < 20 && i < HT_SIZE; i++) {
+        printf("Bucket %d: ", i);
+        int node_idx = h_all_bucket_heads[i];
+        int count = 0;
+        while (node_idx != -1 && count < 5) { // Limit to first 5 elements per bucket
+            printf("(%d,%d) ", h_keys[node_idx], h_values[node_idx]);
+            node_idx = h_next_ptrs[node_idx];
+            count++;
+        }
+        if (node_idx != -1) printf("...");
+        printf("\n");
+    }
+    
+    // Free memory
+    free(element_pool);
+    free(h_bucket_heads);
+    free(h_next_indices);
+    free(h_keys);
+    free(h_values);
+    free(h_next_ptrs);
+    free(h_all_bucket_heads);
+    
+    CHECK(cudaFree(d_element_pool));
+    CHECK(cudaFree(h_table.locks));
+    CHECK(cudaFree(h_table.next_indices));
+    CHECK(cudaFree(h_table.keys));
+    CHECK(cudaFree(h_table.values));
+    CHECK(cudaFree(h_table.next_ptrs));
+    CHECK(cudaFree(h_table.bucket_heads));
+    CHECK(cudaFree(d_table));
+    CHECK(cudaFree(d_bufs));
+    CHECK(cudaFree(d_done));
+    CHECK(cudaFree(d_shared_data));
+    CHECK(cudaFree(d_keys));
+    CHECK(cudaFree(d_values));
+    
+    return elapsed_time;
+}
+
+int main(int argc, char** argv) {
+    // Seed random number generator
+    srand(time(NULL));
+    
+    // Default parameters
+    int num_operations = 1000000;  // Number of hash table operations
+    int num_servers = 4;           // Number of server blocks
+    int num_clients = 16 * BLOCK_SIZE; // Number of client threads
+    int collision_factor = CF_1K;  // Default collision factor
+    
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-cf") == 0 && i+1 < argc) {
+            // Collision factor
+            int cf = atoi(argv[++i]);
+            if (cf == 256) collision_factor = CF_256;
+            else if (cf == 1024) collision_factor = CF_1K;
+            else if (cf == 32768) collision_factor = CF_32K;
+            else if (cf == 131072) collision_factor = CF_128K;
+            else printf("Warning: Invalid collision factor. Using default.\n");
+        } else if (strcmp(argv[i], "-n") == 0 && i+1 < argc) {
+            // Number of operations
+            num_operations = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-s") == 0 && i+1 < argc) {
+            // Number of servers
+            num_servers = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-c") == 0 && i+1 < argc) {
+            // Number of clients
+            num_clients = atoi(argv[++i]);
+        } else {
+            printf("Usage: %s [-cf collision_factor] [-n num_operations] [-s num_servers] [-c num_clients]\n", argv[0]);
+            printf("  collision_factor: 256, 1024, 32768, or 131072\n");
+            return 1;
+        }
+    }
+    
+    printf("Hash Table Benchmark\n");
+    printf("====================\n");
+    printf("Hash Table Size: %d buckets\n", HT_SIZE);
+    printf("Collision Factor: %d\n", collision_factor);
+    printf("Number of Operations: %d\n", num_operations);
+    printf("Number of Servers: %d\n", num_servers);
+    printf("Number of Clients: %d\n", num_clients);
+    printf("\n");
+    
+    // Run sequential benchmark
+    double seq_time = run_sequential_benchmark(collision_factor, num_operations);
+    printf("Sequential Time: %.4f seconds\n\n", seq_time);
+    
+    // Run CUDA benchmark
+    double cuda_time = run_cuda_benchmark(collision_factor, num_operations, num_servers, num_clients);
+    printf("CUDA Time: %.4f seconds\n\n", cuda_time);
+    
+    // Calculate speedup
+    printf("Speedup: %.2fx\n\n", seq_time / cuda_time);
+    
+    // Run all collision factors if not specified
+    if (argc <= 1) {
+        int collision_factors[] = {CF_256, CF_1K, CF_32K, CF_128K};
+        const char* cf_names[] = {"256", "1K", "32K", "128K"};
+        
+        printf("\nBenchmarking all collision factors:\n");
+        printf("----------------------------------\n");
+        
+        for (int i = 0; i < 4; i++) {
+            if (collision_factors[i] != collision_factor) {
+                printf("\nCollision Factor: %s\n", cf_names[i]);
+                
+                double s_time = run_sequential_benchmark(collision_factors[i], num_operations);
+                printf("Sequential Time: %.4f seconds\n", s_time);
+                
+                double c_time = run_cuda_benchmark(collision_factors[i], num_operations, num_servers, num_clients);
+                printf("CUDA Time: %.4f seconds\n", c_time);
+                
+                printf("Speedup: %.2fx\n", s_time / c_time);
+            }
+        }
+    }
+    
+    return 0;
+}
