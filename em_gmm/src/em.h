@@ -34,9 +34,6 @@
     } while (0)
 
 // Constants
-#define MAX_MSG_SIZE 1024
-#define MAX_QUEUE_SIZE 10240
-
 #define MAX_DIM 32
 #define MAX_COMPONENTS 32
 
@@ -299,5 +296,14 @@ __device__ inline float logDeviceMultivariatePDF(const float* x, const float* me
     // return log of PDF
     return logNorm - 0.5f * quadForm;
 }
+
+// --- BUFFER IMPLEMENTATION FOR CLIENT-SERVER COMMUNICATION ---
+
+struct Buffer {
+    struct Message buf[BUF_CAP];
+    int bitmask[BUF_CAP];
+    int write_idx;
+    int read_idx;
+};
 
 #endif
