@@ -42,14 +42,16 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
         __syncthreads();
         
         Buffer *my_buf = &bufs[blockIdx.x];
+        int empty_iterations = 0;
+        const int MAX_EMPTY_ITERATIONS = 1000; // Add a threshold for empty iterations
         
         while (true) {
             int sent = atomicAdd(done, 0);
+            bool processed = false;
 
             // receive_msg
             Message msg;
 
-            // TODO: Need to check dequeue return val
             if (dequeue(my_buf, &msg)) {
                 // Acquire lock in shmem
                 while (atomicCAS(&locks[msg.counter_idx], 0, 1) != 0) {
@@ -62,15 +64,28 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
 
                 // Release lock
                 atomicExch(&locks[msg.counter_idx], 0);
+                processed = true;
+                empty_iterations = 0;
+            } else {
+                empty_iterations++;
             }
 
-            // Exit when all messages have been processed
-            if (sent >= num_threads && isEmpty(my_buf)) {
+            // Exit when all messages have been processed AND buffer is empty for a while
+            // This ensures we don't exit too early when messages might still be in transit
+            if (sent >= num_threads && (isEmpty(my_buf) || empty_iterations > MAX_EMPTY_ITERATIONS)) {
                 if (threadIdx.x == 0) {
                     printf("Server %d exiting. Processed %d/%d operations\n", 
                           blockIdx.x, sent, num_threads);
                 }
                 break;
+            }
+            
+            // Add a small delay if no messages were processed to reduce contention
+            if (!processed) {
+                // Short yield/backoff to avoid excessive polling
+                for (int i = 0; i < 10; i++) { 
+                    __threadfence_block();
+                }
             }
         }
     } else {

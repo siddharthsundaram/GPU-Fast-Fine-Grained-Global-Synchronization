@@ -35,11 +35,13 @@ __device__ bool enqueue(Buffer *b, Message msg) {
             
     } while (atomicCAS(&b->write_idx, current, next) != current);
     
+    // Store message data first before marking slot as valid
     b->buf[current] = msg;
     
-    // Signal that this slot has valid data
+    // Full memory fence to ensure message is visible before setting bitmask
     __threadfence();
-    // b->bitmask[current] = 1;
+    
+    // Signal that this slot has valid data using atomic operation
     atomicExch(&b->bitmask[current], 1);
     
     return true;
@@ -55,16 +57,20 @@ __device__ bool dequeue(Buffer *b, Message *out_msg) {
         if (current == b->write_idx)
             return false;
 
-        // check to see valid bitmask pos
+        // Check valid bitmask pos atomically - only proceed if data is valid
         if (atomicAdd(&b->bitmask[current], 0) == 0)
             return false;
         
         next = (current + 1) % BUF_CAP;
     } while (atomicCAS(&b->read_idx, current, next) != current);
     
+    // Read message data
     *out_msg = b->buf[current];
-    // free the bitmask
+    
+    // Mark slot as free using atomic operation
     atomicExch(&b->bitmask[current], 0);
-    __threadfence(); // ensure visibility of the bitmask change
+    
+    // Ensure visibility of the bitmask change to other threads
+    __threadfence();
     return true;
 }

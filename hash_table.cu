@@ -169,15 +169,15 @@ __global__ void hash_table_server_kernel(int* counters, int num_counters, int nu
             locks[i] = 0;
         }
         
-        // if (threadIdx.x == 0) {
-        //     printf("Hash Table Server %d initialized locks to 0 in shared memory\n", blockIdx.x);
-        // }
+        if (threadIdx.x == 0) {
+            printf("Hash Table Server %d initialized locks to 0 in shared memory\n", blockIdx.x);
+        }
         
         __syncthreads();
         
         Buffer* my_buf = &bufs[blockIdx.x];
         int empty_iterations = 0;
-        // const int MAX_EMPTY_ITERATIONS = 1000;
+        const int MAX_EMPTY_ITERATIONS = 1000;
         
         while (true) {
             int sent = atomicAdd(done, 0);
@@ -194,20 +194,22 @@ __global__ void hash_table_server_kernel(int* counters, int num_counters, int nu
             }
             
             // Exit condition with safety check - now checking against total client threads
-            // if (sent >= num_threads) {
-            //     if (isEmpty(my_buf) || empty_iterations > MAX_EMPTY_ITERATIONS) {
-            //         if (threadIdx.x == 0) {
-            //             printf("Server %d exiting. done=%d, target=%d, empty_iterations=%d\n", 
-            //                   blockIdx.x, sent, num_threads, empty_iterations);
-            //         }
-            //         break;
-            //     }
-            // }
+            if (sent >= num_threads) {
+                if (isEmpty(my_buf) || empty_iterations > MAX_EMPTY_ITERATIONS) {
+                    if (threadIdx.x == 0) {
+                        printf("Server %d exiting. done=%d, target=%d, empty_iterations=%d\n", 
+                              blockIdx.x, sent, num_threads, empty_iterations);
+                    }
+                    break;
+                }
+            }
             
             // Add a small delay if no messages were processed
             if (!processed_message) {
-                // Short sleep to reduce contention
-                for (int i = 0; i < 100; i++) { }
+                // Short yield/backoff to reduce contention
+                for (int i = 0; i < 10; i++) { 
+                    __threadfence_block();
+                }
             }
         }
     } else {
