@@ -119,7 +119,6 @@ double run_sequential_benchmark(int pool_size) {
 
 // Device-side hash table structure
 struct GPUHashTable {
-    int* locks;        // Lock for each bucket
     int* next_indices; // Array to track next available node index
     int* keys;         // Array of keys
     int* values;       // Array of values
