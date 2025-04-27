@@ -301,54 +301,8 @@ float compareWithGroundTruth(const EMModel& model, const std::vector<GaussianCom
     const int numComponents = std::min(model.numComponents, (int)trueComponents.size());
     
     if (numComponents > 8) {
-        std::cerr << "Warning: Too many components for exhaustive matching. Using greedy matching." << std::endl;
-        
-        // Greedy matching based on mean distance
-        std::vector<bool> used(numComponents, false);
+        std::cerr << "Warning: Too many components - not supported." << std::endl;
         float totalError = 0.0f;
-        
-        for (int i = 0; i < numComponents; i++) {
-            float minDistance = std::numeric_limits<float>::max();
-            int bestMatch = -1;
-            
-            for (int j = 0; j < numComponents; j++) {
-                if (!used[j]) {
-                    // Calculate distance between means
-                    float distance = 0.0f;
-                    for (int d = 0; d < model.numDimensions; d++) {
-                        float diff = model.components[i].mean[d] - trueComponents[j].mean[d];
-                        distance += diff * diff;
-                    }
-                    distance = std::sqrt(distance);
-                    
-                    if (distance < minDistance) {
-                        minDistance = distance;
-                        bestMatch = j;
-                    }
-                }
-            }
-            
-            if (bestMatch != -1) {
-                used[bestMatch] = true;
-                totalError += minDistance;
-                
-                // Calculate weight error
-                float weightError = std::abs(model.components[i].weight - trueComponents[bestMatch].weight);
-                totalError += weightError;
-                
-                // Calculate covariance error (Frobenius norm)
-                float covError = 0.0f;
-                for (int d1 = 0; d1 < model.numDimensions; d1++) {
-                    for (int d2 = 0; d2 < model.numDimensions; d2++) {
-                        float diff = model.components[i].covariance[d1][d2] - trueComponents[bestMatch].covariance[d1][d2];
-                        covError += diff * diff;
-                    }
-                }
-                covError = std::sqrt(covError);
-                totalError += covError;
-            }
-        }
-        
         return totalError / numComponents;
     } else {
         // for small number of components, try all permutations

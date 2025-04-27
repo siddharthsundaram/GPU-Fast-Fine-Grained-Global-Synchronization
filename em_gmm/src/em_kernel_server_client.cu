@@ -55,23 +55,21 @@ __device__ bool dequeue(Buffer *b, Message *out_msg) {
 
 // --- DEVICE FUNCTIONS FOR FINE-GRAINED IMPLEMENTATION ---
 
-// Data-to-server mapping function
 __device__ int mapToServerId(int dataId, int numServerTBs) {
     return dataId % numServerTBs;
 }
 
-// Shared memory lock operations using scratchpad memory
 __device__ void lock_local(int* locks, int lockIdx) {
     while (atomicCAS(&locks[lockIdx], 0, 1) != 0);
 }
 
 __device__ void unlock_local(int* locks, int lockIdx) {
+    __threadfence_block();
     atomicExch(&locks[lockIdx], 0);
 }
 
 // --- FINE-GRAIN IMPLEMENTATION KERNELS ---
 
-// Client kernel for E-step
 __global__ void eStepClientKernel(
     float* d_data,
     float* d_weights,
@@ -84,7 +82,7 @@ __global__ void eStepClientKernel(
     int numComponents,
     int numDimensions,
     int numServerTBs,
-    int* d_backoffCounter
+    int* d_messagesProduced
 ) {
     int dataIdx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -114,7 +112,6 @@ __global__ void eStepClientKernel(
         }
         float logDenom = maxLog + logf(sumExp);
         
-        // instead of directly updating the log-likelihood, send a message to the LL server
         Message llMsg;
         llMsg.operation = OP_UPDATE_LL;
         llMsg.component = 0;  // not used for LL
@@ -132,14 +129,15 @@ __global__ void eStepClientKernel(
             
             if (!enqueued) {
                 // exponential backoff to reduce contention
-                backoff = min(backoff * 2, 1024);  // cap backoff at 1024 cycles
-                for (int i = 0; i < backoff; i++) {
-                    // simple busy-wait backoff
-                    atomicAdd(d_backoffCounter, 0);
+                backoff = min(backoff * 2, 1024);
+                int jitter = (threadIdx.x % 32) * 2;
+                for (int i = 0; i < backoff + jitter; i++) {
+                    __threadfence();
                 }
             }
         }
-        // assume server received message and continue processing
+        // Increment message counter
+        atomicAdd(d_messagesProduced, 1);
         
         // fill responsibilities and send Nk updates to servers
         for (int k = 0; k < numComponents; k++) {
@@ -163,17 +161,18 @@ __global__ void eStepClientKernel(
                 
                 if (!enqueued) {
                     backoff = min(backoff * 2, 1024);
-                    for (int i = 0; i < backoff; i++) {
-                        atomicAdd(d_backoffCounter, 0);
+                    int jitter = (threadIdx.x % 32) * 2;
+                    for (int i = 0; i < backoff + jitter; i++) {
+                        __threadfence();
                     }
                 }
             }
+            // Increment message counter
+            atomicAdd(d_messagesProduced, 1);
         }
     }
-
 }
 
-// Client kernel for M-step means update
 __global__ void updateMeansClientKernel(
     float* d_data,
     float* d_responsibilities,
@@ -182,7 +181,7 @@ __global__ void updateMeansClientKernel(
     int numComponents,
     int numDimensions,
     int numServerTBs,
-    int* d_backoffCounter
+    int* d_messagesProduced
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int compIdx = idx / numDimensions;
@@ -218,15 +217,17 @@ __global__ void updateMeansClientKernel(
             
             if (!enqueued) {
                 backoff = min(backoff * 2, 1024);
-                for (int i = 0; i < backoff; i++) {
-                    atomicAdd(d_backoffCounter, 0);
+                int jitter = (threadIdx.x % 32) * 2;
+                for (int i = 0; i < backoff + jitter; i++) {
+                    __threadfence();
                 }
             }
         }
+        // Increment message counter
+        atomicAdd(d_messagesProduced, 1);
     }
 }
 
-// Client kernel for M-step covariance update
 __global__ void updateCovariancesClientKernel(
     float* d_data,
     float* d_responsibilities,
@@ -236,7 +237,7 @@ __global__ void updateCovariancesClientKernel(
     int numComponents,
     int numDimensions,
     int numServerTBs,
-    int* d_backoffCounter
+    int* d_messagesProduced
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int compIdx = idx / (numDimensions * numDimensions);
@@ -278,22 +279,24 @@ __global__ void updateCovariancesClientKernel(
             
             if (!enqueued) {
                 backoff = min(backoff * 2, 1024);
-                for (int i = 0; i < backoff; i++) {
-                    atomicAdd(d_backoffCounter, 0);
+                int jitter = (threadIdx.x % 32) * 2;
+                for (int i = 0; i < backoff + jitter; i++) {
+                    __threadfence();
                 }
             }
         }
+        // Increment message counter
+        atomicAdd(d_messagesProduced, 1);
     }
 }
 
-// Client kernel for M-step weight update
 __global__ void updateWeightsClientKernel(
     float* d_responsibilities,
     Buffer* d_weightBuffers,
     int numData,
     int numComponents,
     int numServerTBs,
-    int* d_backoffCounter
+    int* d_messagesProduced
 ) {
     int compIdx = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -322,11 +325,14 @@ __global__ void updateWeightsClientKernel(
             
             if (!enqueued) {
                 backoff = min(backoff * 2, 1024);
-                for (int i = 0; i < backoff; i++) {
-                    atomicAdd(d_backoffCounter, 0);
+                int jitter = (threadIdx.x % 32) * 2;
+                for (int i = 0; i < backoff + jitter; i++) {
+                    __threadfence();
                 }
             }
         }
+        // Increment message counter
+        atomicAdd(d_messagesProduced, 1);
     }
 }
 
@@ -342,12 +348,16 @@ __global__ void serverKernel(
     Buffer* d_meanBuffers,
     Buffer* d_covBuffers,
     Buffer* d_LLBuffers,
-    int* d_terminationFlag,
+    int* d_messagesProcessed,
+    int* d_messagesProduced,
+    int* d_serverActive,  // flag to signal if servers should continue running
     int numData,
     int numComponents,
     int numDimensions,
-    int serverId
+    int kernelType // 0 for E-step, 1 for M-step
 ) {
+    const int serverId = blockIdx.x;
+
     // allocate locks in shared memory
     __shared__ int locks[MAX_LOCKS];
     
@@ -357,149 +367,150 @@ __global__ void serverKernel(
     }
     __syncthreads();
     
+    // Keep track of inactive cycles
+    int inactiveCycles = 0;
+    const int MAX_INACTIVE_CYCLES = 1000;  // timeout to prevent infinite loops
     
-    __shared__ volatile bool terminate;
-
-    if (threadIdx.x == 0) {
-        terminate = false;
-    }
-    __syncthreads();
-
-    while (!terminate) {
-        bool processedMessage = false;
+    // process messages until signaled to stop or timeout
+    while (atomicAdd(d_serverActive, 0) > 0) {
+        bool processed = false;
         
-        // process Nk updates
-        Message nkMsg;
-        if (dequeue(&d_NkBuffers[serverId], &nkMsg)) {
-            if (nkMsg.operation == OP_UPDATE_NK) {
-                int comp = nkMsg.component;
-                int lockIdx = comp % MAX_LOCKS;
-                
-                lock_local(locks, lockIdx);
-                d_Nk[comp] += nkMsg.value;
-                unlock_local(locks, lockIdx);
-                
-                processedMessage = true;
-            }
-        }
-        
-        // process weight updates
-        Message weightMsg;
-        if (dequeue(&d_weightBuffers[serverId], &weightMsg)) {
-            if (weightMsg.operation == OP_UPDATE_WEIGHT) {
-                int comp = weightMsg.component;
-                int lockIdx = comp % MAX_LOCKS;
-                
-                lock_local(locks, lockIdx);
-                d_weights[comp] = weightMsg.value / numData;
-                unlock_local(locks, lockIdx);
-                
-                processedMessage = true;
-            }
-        }
-        
-        // process mean updates
-        Message meanMsg;
-        if (dequeue(&d_meanBuffers[serverId], &meanMsg)) {
-            if (meanMsg.operation == OP_UPDATE_MEAN) {
-                int comp = meanMsg.component;
-                int dim = meanMsg.dim1;
-                int lockIdx = (comp * numDimensions + dim) % MAX_LOCKS;
-                
-                lock_local(locks, lockIdx);
-                int idx = comp * numDimensions + dim;
-                if (d_Nk[comp] > 0.0f) {
-                    d_means[idx] = meanMsg.value / d_Nk[comp];
-                }
-                unlock_local(locks, lockIdx);
-                
-                processedMessage = true;
-            }
-        }
-        
-        // process covariance updates
-        Message covMsg;
-        if (dequeue(&d_covBuffers[serverId], &covMsg)) {
-            if (covMsg.operation == OP_UPDATE_COV) {
-                int comp = covMsg.component;
-                int dim1 = covMsg.dim1;
-                int dim2 = covMsg.dim2;
-                int lockIdx = (comp * numDimensions * numDimensions + dim1 * numDimensions + dim2) % MAX_LOCKS;
-                
-                lock_local(locks, lockIdx);
-                int idx = comp * numDimensions * numDimensions + dim1 * numDimensions + dim2;
-                if (d_Nk[comp] > 0.0f) {
-                    float covValue = covMsg.value / d_Nk[comp];
+        if (kernelType == 0) { // E-step server
+            Message nkMsg;
+            if (dequeue(&d_NkBuffers[serverId], &nkMsg)) {
+                if (nkMsg.operation == OP_UPDATE_NK) {
+                    int comp = nkMsg.component;
+                    int lockIdx = comp % MAX_LOCKS;
                     
-                    // add regularization to diagonal elements
-                    if (dim1 == dim2) {
-                        covValue += 1e-6f;
+                    lock_local(locks, lockIdx);
+                    d_Nk[comp] += nkMsg.value;
+                    unlock_local(locks, lockIdx);
+                    
+                    atomicAdd(d_messagesProcessed, 1);
+                    processed = true;
+                    inactiveCycles = 0; 
+                }
+            }
+            
+            Message llMsg;
+            if (dequeue(&d_LLBuffers[serverId], &llMsg)) {
+                if (llMsg.operation == OP_UPDATE_LL) {
+                    lock_local(locks, 0);  // use the first lock for LL
+                    *d_logLikelihood += llMsg.value;
+                    unlock_local(locks, 0);
+                    
+                    atomicAdd(d_messagesProcessed, 1);
+                    processed = true;
+                    inactiveCycles = 0;
+                }
+            }
+        } else { // M-step server
+            Message weightMsg;
+            if (dequeue(&d_weightBuffers[serverId], &weightMsg)) {
+                if (weightMsg.operation == OP_UPDATE_WEIGHT) {
+                    int comp = weightMsg.component;
+                    int lockIdx = comp % MAX_LOCKS;
+                    
+                    lock_local(locks, lockIdx);
+                    d_weights[comp] = weightMsg.value / numData;
+                    unlock_local(locks, lockIdx);
+                    
+                    atomicAdd(d_messagesProcessed, 1);
+                    processed = true;
+                    inactiveCycles = 0; 
+                }
+            }
+            
+            Message meanMsg;
+            if (dequeue(&d_meanBuffers[serverId], &meanMsg)) {
+                if (meanMsg.operation == OP_UPDATE_MEAN) {
+                    int comp = meanMsg.component;
+                    int dim = meanMsg.dim1;
+                    int lockIdx = (comp * numDimensions + dim) % MAX_LOCKS;
+                    
+                    lock_local(locks, lockIdx);
+                    int idx = comp * numDimensions + dim;
+                    if (d_Nk[comp] > 0.0f) {
+                        d_means[idx] = meanMsg.value / d_Nk[comp];
                     }
+                    unlock_local(locks, lockIdx);
                     
-                    d_covariances[idx] = covValue;
+                    atomicAdd(d_messagesProcessed, 1);
+                    processed = true;
+                    inactiveCycles = 0;
                 }
-                unlock_local(locks, lockIdx);
-                
-                processedMessage = true;
+            }
+            
+            Message covMsg;
+            if (dequeue(&d_covBuffers[serverId], &covMsg)) {
+                if (covMsg.operation == OP_UPDATE_COV) {
+                    int comp = covMsg.component;
+                    int dim1 = covMsg.dim1;
+                    int dim2 = covMsg.dim2;
+                    int lockIdx = (comp * numDimensions * numDimensions + dim1 * numDimensions + dim2) % MAX_LOCKS;
+                    
+                    lock_local(locks, lockIdx);
+                    int idx = comp * numDimensions * numDimensions + dim1 * numDimensions + dim2;
+                    if (d_Nk[comp] > 0.0f) {
+                        float covValue = covMsg.value / d_Nk[comp];
+                        
+                        // add regularization to diagonal elements
+                        if (dim1 == dim2) {
+                            covValue += 1e-6f;
+                        }
+                        
+                        d_covariances[idx] = covValue;
+                    }
+                    unlock_local(locks, lockIdx);
+                    
+                    atomicAdd(d_messagesProcessed, 1);
+                    processed = true;
+                    inactiveCycles = 0;
+                }
             }
         }
         
-        // process log-likelihood updates
-        Message llMsg;
-        if (dequeue(&d_LLBuffers[serverId], &llMsg)) {
-            if (llMsg.operation == OP_UPDATE_LL) {
-                lock_local(locks, 0);  // use the first lock for LL
-                *d_logLikelihood += llMsg.value;
-                unlock_local(locks, 0);
-                
-                processedMessage = true;
+        // ff thread 0 in block 0, check if we've processed all messages
+        if (blockIdx.x == 0 && threadIdx.x == 0) {
+            if (atomicAdd(d_messagesProcessed, 0) >= atomicAdd(d_messagesProduced, 0)) {
+                if (inactiveCycles > 100) {
+                    // terminate after several inactive cycles
+                    atomicExch(d_serverActive, 0);
+                }
             }
         }
         
-        // check termination flag
-        if (threadIdx.x == 0 && !processedMessage) {
-            int flag = *d_terminationFlag;
-            if (flag == 1) {
-                terminate = true;
-            }
-        }
-        __syncthreads();
-
-        if (terminate) break;
-        
-        // if no messages were processed, add a small delay to reduce contention
-        if (!processedMessage) {
-            // simple delay using volatile to prevent compiler optimization
+        // if no messages were processed, increment inactive cycle counter
+        if (!processed) {
+            inactiveCycles++;
+            
+            // delay to reduce contention
             volatile int delay = 0;
-            for (int i = 0; i < 100; i++) {
+            for (int i = 0; i < 10; i++) {
                 delay++;
             }
+            
+            // break if inactive for too long
+            if (inactiveCycles > MAX_INACTIVE_CYCLES) {
+                if (blockIdx.x == 0 && threadIdx.x == 0) {
+                    if (atomicAdd(d_messagesProcessed, 0) >= atomicAdd(d_messagesProduced, 0)) {
+                        // processed all messages -> terminate
+                        atomicExch(d_serverActive, 0);
+                    }
+                }
+                __syncthreads();
+                
+                if (atomicAdd(d_serverActive, 0) > 0 && 
+                    blockIdx.x == 0 && threadIdx.x == 0) {
+                    // force termination if we've been inactive too long
+                    atomicExch(d_serverActive, 0);
+                }
+                break;
+            }
         }
-        
     }
 }
 
-// --- HELPER FOR MEMORY CONSISTENCY ---
-
-struct Idx { 
-    int write_idx;
-    int read_idx;
-};
-
-bool buffersEmpty(Buffer *d_buf, int n) {
-    std::vector<Idx> tmp(n);
-
-    // copy only the two indices of each buffer
-    CUDA_CHECK(cudaMemcpy(tmp.data(),
-                          (char*)d_buf + offsetof(Buffer, write_idx),
-                          n * sizeof(Idx),
-                          cudaMemcpyDeviceToHost));
-
-    for (int i = 0; i < n; ++i)
-        if (tmp[i].write_idx != tmp[i].read_idx)
-            return false;
-    return true;
-}
 
 // Main function to run the server-client approach
 EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
@@ -568,10 +579,13 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
     blockSizeCov = (blockSizeCov / deviceProp.warpSize) * deviceProp.warpSize;
     blockSizeServer = (blockSizeServer / deviceProp.warpSize) * deviceProp.warpSize;
 
-    // calculate maximum number of concurrent blocks based on device properties
-    int maxBlocksPerSM = deviceProp.maxBlocksPerMultiProcessor;
+    // updated to ensure enough SMs for both clients and servers
     int numSMs = deviceProp.multiProcessorCount;
-    int maxBlocks = maxBlocksPerSM * numSMs;
+    float serverRatio = opts.workloadRatio;
+    int numServerBlocks = std::max(1, 
+                        std::min(numSMs - 1, 
+                        static_cast<int>(std::ceil(serverRatio * numSMs))));
+    int numClientBlocks = std::max(1, numSMs - numServerBlocks);
 
     // Log the calculated values
     std::cout << "Device: " << deviceProp.name << std::endl;
@@ -580,12 +594,13 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
             << ", Means=" << blockSizeMeans
             << ", Cov=" << blockSizeCov
             << ", Server=" << blockSizeServer << std::endl;
-    std::cout << "Maximum concurrent blocks: " << maxBlocks 
-            << " (" << numSMs << " SMs * " << maxBlocksPerSM << " blocks/SM)" << std::endl;
+    std::cout << "SMs: " << numSMs 
+            << ", Server blocks: " << numServerBlocks 
+            << ", Client SMs: " << numClientBlocks << std::endl;
     
     // allocate device memory for model parameters
     float *d_data, *d_weights, *d_means, *d_covariances, *d_responsibilities, *d_Nk, *d_logLikelihood;
-    int *d_terminationFlag, *d_backoffCounter;
+    int *d_messagesProduced, *d_messagesProcessed;
     
     CUDA_CHECK(cudaMalloc(&d_data, numData * model.numDimensions * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_weights, model.numComponents * sizeof(float)));
@@ -594,16 +609,11 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
     CUDA_CHECK(cudaMalloc(&d_responsibilities, numData * model.numComponents * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_Nk, model.numComponents * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_logLikelihood, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_terminationFlag, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_backoffCounter, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_messagesProduced, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_messagesProcessed, sizeof(int)));
 
     // allocate memory for message buffers
     Buffer *d_NkBuffers, *d_weightBuffers, *d_meanBuffers, *d_covBuffers, *d_LLBuffers;
-
-    // Determine server/client block split based on workload ratio
-    float serverRatio = opts.workloadRatio;
-    int numServerBlocks = max(1, (int)(maxBlocks * serverRatio));
-    int numClientBlocks = maxBlocks - numServerBlocks;
     
     CUDA_CHECK(cudaMalloc(&d_NkBuffers, numServerBlocks * sizeof(Buffer)));
     CUDA_CHECK(cudaMalloc(&d_weightBuffers, numServerBlocks * sizeof(Buffer)));
@@ -611,15 +621,18 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
     CUDA_CHECK(cudaMalloc(&d_covBuffers, numServerBlocks * sizeof(Buffer)));
     CUDA_CHECK(cudaMalloc(&d_LLBuffers, numServerBlocks * sizeof(Buffer)));
 
-    std::cout << "Maximum concurrent blocks: " << maxBlocks << std::endl;
     std::cout << "Server blocks: " << numServerBlocks << ", Client blocks: " << numClientBlocks << std::endl;
-
 
     // initialize all buffers on host
     std::vector<Buffer> h_buffers(numServerBlocks * 5);  // 5 buffer types
     
     for (int i = 0; i < numServerBlocks * 5; i++) {
+        // zero the entire buffer
         memset(&h_buffers[i], 0, sizeof(Buffer));
+        
+        // explicitly set indices to ensure they match
+        h_buffers[i].write_idx = 0;
+        h_buffers[i].read_idx = 0;
     }
     
     // copy initialized buffers to device
@@ -635,21 +648,28 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
     CUDA_CHECK(cudaMemcpy(d_means, means.data(), model.numComponents * model.numDimensions * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_covariances, covariances.data(), model.numComponents * model.numDimensions * model.numDimensions * sizeof(float), cudaMemcpyHostToDevice));
     
-    // initialize counters and flags
-    CUDA_CHECK(cudaMemset(d_terminationFlag, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_backoffCounter, 0, sizeof(int)));
-
     // calculate grid sizes for client kernels
-    int numBlocksData = min(numClientBlocks, (numData + blockSizeEStep - 1) / blockSizeEStep);
-    int numBlocksComponents = min(numClientBlocks, (model.numComponents + blockSizeWeights - 1) / blockSizeWeights);
-    int numBlocksMeans = min(numClientBlocks, (model.numComponents * model.numDimensions + blockSizeMeans - 1) / blockSizeMeans);
-    int numBlocksCovariances = min(numClientBlocks, (model.numComponents * model.numDimensions * model.numDimensions +
-                               blockSizeCov - 1) / blockSizeCov);
+    int numBlocksData = min((numData + blockSizeEStep - 1) / blockSizeEStep, numClientBlocks * 16);
+    int numBlocksComponents = min((model.numComponents + blockSizeWeights - 1) / blockSizeWeights, numClientBlocks * 4);
+    int numBlocksMeans = min((model.numComponents * model.numDimensions + blockSizeMeans - 1) / blockSizeMeans, numClientBlocks * 8);
+    int numBlocksCovariances = min((model.numComponents * model.numDimensions * model.numDimensions + blockSizeCov - 1) / blockSizeCov, numClientBlocks * 16);
+
     
     // create CUDA streams for parallel execution
-    cudaStream_t clientStream, serverStream;
+    // Create CUDA streams with appropriate priorities -- added as workaround for prior deadlock issue
+    cudaStream_t serverStream, clientStream;
+    int leastPrio, greatestPrio;
+    CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&leastPrio, &greatestPrio));
+
+    // low priority for servers to allow clients to run first to ensure there are messages to process
+    CUDA_CHECK(cudaStreamCreateWithPriority(&serverStream, cudaStreamNonBlocking, leastPrio));
     CUDA_CHECK(cudaStreamCreate(&clientStream));
-    CUDA_CHECK(cudaStreamCreate(&serverStream));
+
+    
+    // create CUDA events for synchronization
+    cudaEvent_t clientDone, serverDone;
+    CUDA_CHECK(cudaEventCreate(&clientDone));
+    CUDA_CHECK(cudaEventCreate(&serverDone));
     
     model.iterations = 0;
     bool converged = false;
@@ -657,66 +677,109 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
     // start timing
     auto startTime = std::chrono::high_resolution_clock::now();
     
-    // launch server kernels - they will run in parallel with client kernels
-    for (int i = 0; i < numServerBlocks; i++) {
-        serverKernel<<<1, blockSizeServer, 0, serverStream>>>(
-            d_weights, d_means, d_covariances, d_Nk, d_logLikelihood,
-            d_NkBuffers, d_weightBuffers, d_meanBuffers, d_covBuffers, d_LLBuffers,
-            d_terminationFlag, numData, model.numComponents, model.numDimensions, i
-        );
-    }
-    
     // Main EM loop
     while (!converged && model.iterations < opts.maxIterations) {
         // reset Nk and log-likelihood for this iteration
         CUDA_CHECK(cudaMemset(d_Nk, 0, model.numComponents * sizeof(float)));
         CUDA_CHECK(cudaMemset(d_logLikelihood, 0, sizeof(float)));
         
-        cudaStreamSynchronize(clientStream);
-        while (!buffersEmpty(d_NkBuffers, numServerBlocks) ||
-                !buffersEmpty(d_weightBuffers, numServerBlocks) ||
-                !buffersEmpty(d_meanBuffers, numServerBlocks) ||
-                !buffersEmpty(d_covBuffers, numServerBlocks)) {
-        }
-
-        // E-step
+        // --- E-step Phase ---
+        
+        // reset message counters
+        CUDA_CHECK(cudaMemset(d_messagesProduced, 0, sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_messagesProcessed, 0, sizeof(int)));
+        
+        // allocate and set server active flag
+        int* d_serverActive;
+        CUDA_CHECK(cudaMalloc(&d_serverActive, sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_serverActive, 1, sizeof(int)));  // 1 means active
+        
+        // launch E-step server kernel first to be ready to process messages ASAP
+        // caused 1st iteration to not process messages 
+        serverKernel<<<numServerBlocks, blockSizeServer, 0, serverStream>>>(
+            d_weights, d_means, d_covariances, d_Nk, d_logLikelihood,
+            d_NkBuffers, d_weightBuffers, d_meanBuffers, d_covBuffers, d_LLBuffers,
+            d_messagesProcessed, d_messagesProduced, d_serverActive, 
+            numData, model.numComponents, model.numDimensions, 0 // 0 for E-step
+        );
+        
+        // launch E-step client kernel on client stream
         eStepClientKernel<<<numBlocksData, blockSizeEStep, 0, clientStream>>>(
             d_data, d_weights, d_means, d_covariances, d_responsibilities,
             d_NkBuffers, d_LLBuffers, numData, model.numComponents, model.numDimensions, 
-            numServerBlocks, d_backoffCounter
+            numServerBlocks, d_messagesProduced
         );
-        // ensure that the clients have sent messages and Nk buffer is empty -> all processed
-        CUDA_CHECK(cudaStreamSynchronize(clientStream));
-        while (!buffersEmpty(d_NkBuffers, numServerBlocks)) {
-        }
         
-        // M-step (client kernels)
+        // wait for clients to finish
+        CUDA_CHECK(cudaEventRecord(clientDone, clientStream));
+        CUDA_CHECK(cudaEventSynchronize(clientDone));
+        
+        // signal server active flag to stop
+        CUDA_CHECK(cudaMemset(d_serverActive, 0, sizeof(int)));
+        
+        // ensure servers have finished
+        CUDA_CHECK(cudaEventRecord(serverDone, serverStream));
+        CUDA_CHECK(cudaEventSynchronize(serverDone));
+        
+        // get E-step statistics
+        int messagesProducedEStep, messagesProcessedEStep;
+        CUDA_CHECK(cudaMemcpy(&messagesProducedEStep, d_messagesProduced, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&messagesProcessedEStep, d_messagesProcessed, sizeof(int), cudaMemcpyDeviceToHost));
+        
+        // free resources
+        CUDA_CHECK(cudaFree(d_serverActive));
+        
+        // --- M-step Phase ---
+        
+        CUDA_CHECK(cudaMemset(d_messagesProduced, 0, sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_messagesProcessed, 0, sizeof(int)));
+        
+        CUDA_CHECK(cudaMalloc(&d_serverActive, sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_serverActive, 1, sizeof(int)));
+        
+        serverKernel<<<numServerBlocks, blockSizeServer, 0, serverStream>>>(
+            d_weights, d_means, d_covariances, d_Nk, d_logLikelihood,
+            d_NkBuffers, d_weightBuffers, d_meanBuffers, d_covBuffers, d_LLBuffers,
+            d_messagesProcessed, d_messagesProduced, d_serverActive,
+            numData, model.numComponents, model.numDimensions, 1
+        );
+        
         updateWeightsClientKernel<<<numBlocksComponents, blockSizeWeights, 0, clientStream>>>(
             d_responsibilities, d_weightBuffers, numData, model.numComponents, 
-            numServerBlocks, d_backoffCounter
+            numServerBlocks, d_messagesProduced
         );
         
         updateMeansClientKernel<<<numBlocksMeans, blockSizeMeans, blockSizeMeans * sizeof(float), clientStream>>>(
             d_data, d_responsibilities, d_meanBuffers, numData, model.numComponents, 
-            model.numDimensions, numServerBlocks, d_backoffCounter
+            model.numDimensions, numServerBlocks, d_messagesProduced
         );
         
         updateCovariancesClientKernel<<<numBlocksCovariances, blockSizeCov, blockSizeCov * sizeof(float), clientStream>>>(
             d_data, d_responsibilities, d_means, d_covBuffers, numData, model.numComponents,
-            model.numDimensions, numServerBlocks, d_backoffCounter
+            model.numDimensions, numServerBlocks, d_messagesProduced
         );
         
-        // need to synchronize with server stream to ensure all messages are processed here 
-        // before computing the log-likelihood and checking convergence else correctness might
-        // be detrimentally affected
-        CUDA_CHECK(cudaStreamSynchronize(clientStream));
-        while (!buffersEmpty(d_LLBuffers, numServerBlocks)) {
-        }
-        // Copy log-likelihood to host
+        CUDA_CHECK(cudaEventRecord(clientDone, clientStream));
+        CUDA_CHECK(cudaEventSynchronize(clientDone));
+        
+        CUDA_CHECK(cudaMemset(d_serverActive, 0, sizeof(int)));
+        
+        CUDA_CHECK(cudaEventRecord(serverDone, serverStream));
+        CUDA_CHECK(cudaEventSynchronize(serverDone));
+        
+        int messagesProducedMStep, messagesProcessedMStep;
+        CUDA_CHECK(cudaMemcpy(&messagesProducedMStep, d_messagesProduced, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&messagesProcessedMStep, d_messagesProcessed, sizeof(int), cudaMemcpyDeviceToHost));
+        
+        CUDA_CHECK(cudaFree(d_serverActive));
+        
+        // --- Convergence ---
+        
+        // copy log-likelihood to host
         float logLikelihood;
         CUDA_CHECK(cudaMemcpy(&logLikelihood, d_logLikelihood, sizeof(float), cudaMemcpyDeviceToHost));
         
-        // Check convergence
+        // check convergence
         converged = std::abs(logLikelihood - prevLogLikelihood) < 
                     opts.tolerance * std::abs(prevLogLikelihood);
         prevLogLikelihood = logLikelihood;
@@ -724,29 +787,28 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
         
         model.iterations++;
         
-        // Print iteration information
+        // print iteration information
         std::cout << "Iteration " << model.iterations
-            << ", Log-likelihood: " << model.logLikelihood << std::endl;
-            
+            << ", Log-likelihood: " << model.logLikelihood 
+            << " (E-step msgs: " << messagesProducedEStep << "/" << messagesProcessedEStep
+            << ", M-step msgs: " << messagesProducedMStep << "/" << messagesProcessedMStep << ")" << std::endl;
     }
     
-    // Signal servers to terminate
-    int terminationFlag = 1;
-    CUDA_CHECK(cudaMemcpy(d_terminationFlag, &terminationFlag, sizeof(int), cudaMemcpyHostToDevice));
-    
-    // Wait for servers to terminate
-    CUDA_CHECK(cudaDeviceSynchronize());
-    
-    // End timing
+    // end timing
     auto endTime = std::chrono::high_resolution_clock::now();
     model.timeElapsed = std::chrono::duration<double>(endTime - startTime).count();
+
+    CUDA_CHECK(cudaEventDestroy(clientDone));
+    CUDA_CHECK(cudaEventDestroy(serverDone));
+    CUDA_CHECK(cudaStreamDestroy(serverStream));
+    CUDA_CHECK(cudaStreamDestroy(clientStream));
     
-    // Copy results back to host
+    // copy results back to host
     CUDA_CHECK(cudaMemcpy(weights.data(), d_weights, model.numComponents * sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(means.data(), d_means, model.numComponents * model.numDimensions * sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(covariances.data(), d_covariances, model.numComponents * model.numDimensions * model.numDimensions * sizeof(float), cudaMemcpyDeviceToHost));
     
-    // Update model parameters
+    // update model parameters
     for (int k = 0; k < model.numComponents; k++) {
         model.components[k].weight = weights[k];
         
@@ -760,7 +822,7 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
         }
     }
     
-    // Free device memory
+    // free device memory
     CUDA_CHECK(cudaFree(d_data));
     CUDA_CHECK(cudaFree(d_weights));
     CUDA_CHECK(cudaFree(d_means));
@@ -768,19 +830,15 @@ EMModel runServerClientGPU(const InputData& inputData, const ArgOpts& opts) {
     CUDA_CHECK(cudaFree(d_responsibilities));
     CUDA_CHECK(cudaFree(d_Nk));
     CUDA_CHECK(cudaFree(d_logLikelihood));
-    CUDA_CHECK(cudaFree(d_terminationFlag));
-    CUDA_CHECK(cudaFree(d_backoffCounter));
+    CUDA_CHECK(cudaFree(d_messagesProduced));
+    CUDA_CHECK(cudaFree(d_messagesProcessed));
     
-    // Free buffer memory
+    // free buffer memory
     CUDA_CHECK(cudaFree(d_NkBuffers));
     CUDA_CHECK(cudaFree(d_weightBuffers));
     CUDA_CHECK(cudaFree(d_meanBuffers));
     CUDA_CHECK(cudaFree(d_covBuffers));
     CUDA_CHECK(cudaFree(d_LLBuffers));
-    
-    // Destroy streams
-    CUDA_CHECK(cudaStreamDestroy(clientStream));
-    CUDA_CHECK(cudaStreamDestroy(serverStream));
     
     if (converged) {
         std::cout << (converged ? "EM converged" : "Reached max iterations")

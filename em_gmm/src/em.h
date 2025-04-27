@@ -39,7 +39,7 @@
 
 #define MAX_LOCKS 1024
 
-#define BUF_CAP 1024
+#define BUF_CAP 16384
 
 // Operation types for message passing
 enum OperationType {
@@ -82,19 +82,19 @@ struct GaussianComponent {
 // Structure for EM model
 struct EMModel {
     std::vector<GaussianComponent> components;  // Gaussian components
-    int numComponents;                          // Number of components
-    int numDimensions;                          // Dimensionality of data
-    float logLikelihood;                        // Current log-likelihood
+    int numComponents; // Number of components
+    int numDimensions;  // Dimensionality of data
+    float logLikelihood;  // Current log-likelihood
     
     // Performance measurement
-    double timeElapsed;                         // Time taken for execution
-    int iterations;                             // Number of iterations performed
+    double timeElapsed;  // time taken for execution
+    int iterations; // number of iterations performed
 };
 
 // Structure for input data with ground truth
 struct InputData {
-    std::vector<std::vector<float>> points;       // Data points
-    std::vector<GaussianComponent> trueComponents; // True Gaussian components
+    std::vector<std::vector<float>> points;       // data points
+    std::vector<GaussianComponent> trueComponents; // true Gaussian components
 };
 
 // Command line parsing functions
@@ -299,8 +299,8 @@ __device__ inline float logDeviceMultivariatePDF(const float* x, const float* me
 
 // --- BUFFER IMPLEMENTATION FOR CLIENT-SERVER COMMUNICATION ---
 
-struct Buffer {
-    struct Message buf[BUF_CAP];
+struct __align__(128) Buffer {  // aligning fixed correctness issue for server/client implementation
+    Message buf[BUF_CAP];
     int bitmask[BUF_CAP];
     int write_idx;
     int read_idx;
