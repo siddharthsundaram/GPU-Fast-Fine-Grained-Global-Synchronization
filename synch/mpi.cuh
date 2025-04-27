@@ -26,8 +26,6 @@ __device__ void send_msg(int target_server, int index_to_increment, Buffer *bufs
 __global__ void counters_client_and_server_entry(int *counters, int num_counters, int num_server_blocks, Buffer *bufs, int *done, int num_threads) {
     bool is_server = blockIdx.x < num_server_blocks;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_threads = gridDim.x * blockDim.x;
-    // int num_clients = total_threads - (num_server_blocks * blockDim.x);
     
     if (is_server) {
 
@@ -43,7 +41,7 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
         }
 
         __syncthreads();
-        // __threadfence_block();
+        // __threadfence();
         
         Buffer *my_buf = &bufs[blockIdx.x];
         

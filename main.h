@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include "synch/mpi.cuh"
 
-void sequential(char* input);
-__global__ void basic(int num_increments, int *locks, int *shared_data, int size);
+void sequential(int size, int num_increments);
+__global__ void basic_gpu(int *locks, int *shared_data, int size, int num_clients);
 void gpu_buffer(int size, int num_servers, int num_clients);
 
 #endif // MAIN_H
