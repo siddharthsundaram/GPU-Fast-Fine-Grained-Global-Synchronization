@@ -28,8 +28,35 @@ $(HASH_TABLE_EXE): $(HASH_TABLE_OBJ)
 test:
 	./$(MAIN_EXE) inputs/test0
 
+# Updated to only use collision factor and server blocks parameters
 hash_table_test:
-	./$(HASH_TABLE_EXE) -cf 1024 -n 1000000 -s 4 -c 16
+	./$(HASH_TABLE_EXE) --cf 1024 --servers 4
+
+# Additional benchmark targets for different collision factors
+hash_table_256:
+	./$(HASH_TABLE_EXE) --cf 256 --servers 4
+
+hash_table_1k:
+	./$(HASH_TABLE_EXE) --cf 1024 --servers 4
+
+hash_table_32k:
+	./$(HASH_TABLE_EXE) --cf 32768 --servers 4
+
+hash_table_128k:
+	./$(HASH_TABLE_EXE) --cf 131072 --servers 4
+
+# Run all collision factor benchmarks sequentially
+hash_table_all: $(HASH_TABLE_EXE)
+	@echo "Running all hash table benchmarks..."
+	@echo "CF=256:"
+	@./$(HASH_TABLE_EXE) --cf 256 --servers 4
+	@echo "\nCF=1024:"
+	@./$(HASH_TABLE_EXE) --cf 1024 --servers 4
+	@echo "\nCF=32768:"
+	@./$(HASH_TABLE_EXE) --cf 32768 --servers 4
+	@echo "\nCF=131072:"
+	@./$(HASH_TABLE_EXE) --cf 131072 --servers 4
+	@echo "\nBenchmark complete."
 
 clean:
 	rm -f *.o $(MAIN_EXE) $(HASH_TABLE_EXE)

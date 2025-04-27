@@ -79,8 +79,8 @@ void free_hash_table(HashTable* table) {
     free(table);
 }
 
-double run_sequential_benchmark(int pool_size, int num_operations) {
-    printf("Running sequential benchmark with pool size %d and %d operations\n", pool_size, num_operations);
+double run_sequential_benchmark(int pool_size) {
+    printf("Running sequential benchmark with pool size %d\n", pool_size);
     
     HashTable* table = create_hash_table(HT_SIZE);
     
@@ -92,8 +92,8 @@ double run_sequential_benchmark(int pool_size, int num_operations) {
     
     double start_time = get_time();
     
-    // Perform insertions
-    for (int i = 0; i < num_operations; i++) {
+    // Perform insertions - use pool_size as the number of operations
+    for (int i = 0; i < pool_size; i++) {
         int element = element_pool[rand() % pool_size];
         insert(table, element, i);
     }
@@ -169,15 +169,15 @@ __global__ void hash_table_server_kernel(int* counters, int num_counters, int nu
             locks[i] = 0;
         }
         
-        if (threadIdx.x == 0) {
-            printf("Hash Table Server %d initialized locks to 0 in shared memory\n", blockIdx.x);
-        }
+        // if (threadIdx.x == 0) {
+        //     printf("Hash Table Server %d initialized locks to 0 in shared memory\n", blockIdx.x);
+        // }
         
         __syncthreads();
         
         Buffer* my_buf = &bufs[blockIdx.x];
         int empty_iterations = 0;
-        const int MAX_EMPTY_ITERATIONS = 1000;
+        // const int MAX_EMPTY_ITERATIONS = 1000;
         
         while (true) {
             int sent = atomicAdd(done, 0);
@@ -193,16 +193,16 @@ __global__ void hash_table_server_kernel(int* counters, int num_counters, int nu
                 empty_iterations++;
             }
             
-            // Exit condition with safety check
-            if (sent >= num_threads) {
-                if (isEmpty(my_buf) || empty_iterations > MAX_EMPTY_ITERATIONS) {
-                    if (threadIdx.x == 0) {
-                        printf("Server %d exiting. done=%d, num_threads=%d, empty_iterations=%d\n", 
-                              blockIdx.x, sent, num_threads, empty_iterations);
-                    }
-                    break;
-                }
-            }
+            // Exit condition with safety check - now checking against total client threads
+            // if (sent >= num_threads) {
+            //     if (isEmpty(my_buf) || empty_iterations > MAX_EMPTY_ITERATIONS) {
+            //         if (threadIdx.x == 0) {
+            //             printf("Server %d exiting. done=%d, target=%d, empty_iterations=%d\n", 
+            //                   blockIdx.x, sent, num_threads, empty_iterations);
+            //         }
+            //         break;
+            //     }
+            // }
             
             // Add a small delay if no messages were processed
             if (!processed_message) {
@@ -211,17 +211,21 @@ __global__ void hash_table_server_kernel(int* counters, int num_counters, int nu
             }
         }
     } else {
-        // Client code
-        if (tid < (num_server_blocks * blockDim.x + num_threads)) {
-            // Generate a random bucket to insert into
-            int counter = tid % num_counters;
+        // Client code - one thread per message
+        // Calculate the client thread ID (relative to all client threads)
+        int client_tid = tid - (num_server_blocks * blockDim.x);
+        
+        // Only threads within the pool size range participate
+        if (client_tid < num_threads) {
+            // Generate hash bucket based on the client thread ID
+            int counter = client_tid % num_counters;
             int target_server = counter % num_server_blocks;
             
-            // Send message to server
+            // Send exactly one message per client thread
             send_msg(target_server, counter, bufs, done);
             
             if (threadIdx.x == 0 && blockIdx.x == num_server_blocks) {
-                printf("Client thread block completed sending messages\n");
+                printf("Client threads started sending messages\n");
             }
         }
     }
@@ -230,8 +234,8 @@ __global__ void hash_table_server_kernel(int* counters, int num_counters, int nu
 }
 
 // Run CUDA hash table benchmark
-double run_cuda_benchmark(int pool_size, int num_operations, int num_servers, int num_clients) {
-    printf("Running CUDA benchmark with pool size %d and %d operations\n", pool_size, num_operations);
+double run_cuda_benchmark(int pool_size, int num_servers, int num_clients) {
+    printf("Running CUDA benchmark with pool size %d\n", pool_size);
     
     // Allocate host memory
     int* h_bucket_heads = (int*)malloc(sizeof(int) * HT_SIZE);
@@ -277,15 +281,10 @@ double run_cuda_benchmark(int pool_size, int num_operations, int num_servers, in
     memset(h_bufs, 0, num_servers * sizeof(Buffer));
     CHECK(cudaMemcpy(d_bufs, h_bufs, num_servers * sizeof(Buffer), cudaMemcpyHostToDevice));
     free(h_bufs);
-
-    
-    // Calculate actual number of client threads
-    int client_threads_per_block = BLOCK_SIZE;
-    int total_client_threads = num_clients;
     
     // Start timer
     printf("Launching kernel with %d server blocks and %d client threads...\n", 
-           num_servers, total_client_threads);
+           num_servers, num_clients);
     cudaDeviceSynchronize();
     double start_time = get_time();
     
@@ -299,7 +298,7 @@ double run_cuda_benchmark(int pool_size, int num_operations, int num_servers, in
     
     hash_table_server_kernel<<<grid_size, block_size, shared_mem_size>>>(
         d_shared_data, HT_SIZE, num_servers, d_bufs, d_done, 
-        total_client_threads, d_table);
+        num_clients, d_table);
     
     // Wait for kernel to complete with timeout
     cudaError_t error = cudaSuccess;
@@ -350,10 +349,8 @@ int main(int argc, char** argv) {
     srand(time(NULL));
     
     // Default parameters
-    int num_operations = 1000000;  // Number of hash table operations
     int num_servers = 4;           // Number of server blocks
-    int num_clients = 16 * BLOCK_SIZE; // Number of client threads
-    int collision_factor = CF_1K;  // Default collision factor
+    int collision_factor = CF_1K;  // Default collision factor (1024)
     
     // Using boost program options for argument parsing
     try {
@@ -361,88 +358,51 @@ int main(int argc, char** argv) {
         desc.add_options()
             ("help", "Show help message")
             ("cf", bpo::value<int>()->default_value(CF_1K), "Collision factor (256, 1024, 32768, or 131072)")
-            ("n", bpo::value<int>()->default_value(1000000), "Number of operations")
-            ("s", bpo::value<int>()->default_value(4), "Number of server blocks")
-            ("c", bpo::value<int>()->default_value(16 * BLOCK_SIZE), "Number of client threads")
-            ("all", "Run benchmarks with all collision factors");
-            
+            ("servers", bpo::value<int>()->default_value(4), "Number of server blocks");
+        
         bpo::variables_map vm;
         bpo::store(bpo::parse_command_line(argc, argv, desc), vm);
         bpo::notify(vm);
         
         if (vm.count("help")) {
             std::cout << desc << "\n";
-            return 0;
+            return 1;
         }
         
-        if (vm.count("cf")) {
-            int cf = vm["cf"].as<int>();
-            if (cf == CF_256 || cf == CF_1K || cf == CF_32K || cf == CF_128K) {
-                collision_factor = cf;
-            } else {
-                std::cout << "Warning: Invalid collision factor. Using default.\n";
-            }
+        collision_factor = vm["cf"].as<int>();
+        num_servers = vm["servers"].as<int>();
+        
+        // Validate collision factor is one of the expected values
+        if (collision_factor != CF_256 && collision_factor != CF_1K && 
+            collision_factor != CF_32K && collision_factor != CF_128K) {
+            std::cerr << "Error: Collision factor must be one of: 256, 1024, 32768, or 131072\n";
+            return 1;
         }
         
-        if (vm.count("n")) {
-            num_operations = vm["n"].as<int>();
-        }
-        
-        if (vm.count("s")) {
-            num_servers = vm["s"].as<int>();
-        }
-        
-        if (vm.count("c")) {
-            num_clients = vm["c"].as<int>();
-        }
-        
-        printf("Hash Table Benchmark\n");
-        printf("====================\n");
-        printf("Hash Table Size: %d buckets\n", HT_SIZE);
-        printf("Collision Factor: %d\n", collision_factor);
-        printf("Number of Operations: %d\n", num_operations);
-        printf("Number of Servers: %d\n", num_servers);
-        printf("Number of Clients: %d\n", num_clients);
-        printf("\n");
-        
-        // Run sequential benchmark
-        double seq_time = run_sequential_benchmark(collision_factor, num_operations);
-        printf("Sequential Time: %.4f seconds\n\n", seq_time);
-        
-        // Run CUDA benchmark
-        double cuda_time = run_cuda_benchmark(collision_factor, num_operations, num_servers, num_clients);
-        printf("CUDA Time: %.4f seconds\n\n", cuda_time);
-        
-        // Calculate speedup
-        printf("Speedup: %.2fx\n\n", seq_time / cuda_time);
-        
-        // Run all collision factors if specified
-        if (vm.count("all")) {
-            int collision_factors[] = {CF_256, CF_1K, CF_32K, CF_128K};
-            const char* cf_names[] = {"256", "1K", "32K", "128K"};
-            
-            printf("\nBenchmarking all collision factors:\n");
-            printf("----------------------------------\n");
-            
-            for (int i = 0; i < 4; i++) {
-                if (collision_factors[i] != collision_factor) {
-                    printf("\nCollision Factor: %s\n", cf_names[i]);
-                    
-                    double s_time = run_sequential_benchmark(collision_factors[i], num_operations);
-                    printf("Sequential Time: %.4f seconds\n", s_time);
-                    
-                    double c_time = run_cuda_benchmark(collision_factors[i], num_operations, num_servers, num_clients);
-                    printf("CUDA Time: %.4f seconds\n", c_time);
-                    
-                    printf("Speedup: %.2fx\n", s_time / c_time);
-                }
-            }
-        }
-    }
-    catch(std::exception& e) {
+    } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
+    
+    // Print benchmark parameters
+    std::cout << "Running benchmark with:\n"
+              << "  - Collision factor: " << collision_factor << "\n"
+              << "  - Number of server blocks: " << num_servers << "\n";
+              
+    // Number of client threads equals the pool size (collision factor)
+    int num_clients = collision_factor;
+    
+    // Run sequential benchmark
+    double seq_time = run_sequential_benchmark(collision_factor);
+    
+    // Run CUDA benchmark
+    double cuda_time = run_cuda_benchmark(collision_factor, num_servers, num_clients);
+    
+    // Print results
+    printf("\nResults summary:\n");
+    printf("Sequential time: %.6f seconds\n", seq_time);
+    printf("CUDA time: %.6f seconds\n", cuda_time);
+    printf("Speedup: %.2fx\n", seq_time / cuda_time);
     
     return 0;
 }

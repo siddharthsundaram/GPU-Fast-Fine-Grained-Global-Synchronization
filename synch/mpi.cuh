@@ -26,11 +26,8 @@ __device__ void send_msg(int target_server, int index_to_increment, Buffer *bufs
 __global__ void counters_client_and_server_entry(int *counters, int num_counters, int num_server_blocks, Buffer *bufs, int *done, int num_threads) {
     bool is_server = blockIdx.x < num_server_blocks;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_threads = gridDim.x * blockDim.x;
-    // int num_clients = total_threads - (num_server_blocks * blockDim.x);
     
     if (is_server) {
-
         // TODO: Possibly move this to a separate kernel
         // do server stuff
         extern __shared__ int locks[];
@@ -43,7 +40,6 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
         }
 
         __syncthreads();
-        // __threadfence_block();
         
         Buffer *my_buf = &bufs[blockIdx.x];
         
@@ -55,39 +51,45 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
 
             // TODO: Need to check dequeue return val
             if (dequeue(my_buf, &msg)) {
-
-                // printf("Server received msg: counter_idx = %d\n", msg.counter_idx);
-
                 // Acquire lock in shmem
                 while (atomicCAS(&locks[msg.counter_idx], 0, 1) != 0) {
-                    // printf("Waiting for lock on counter_idx %d\n", msg.counter_idx);
+                    // Spin waiting for lock
                 }
 
                 // Critical section: increment counter
                 counters[msg.counter_idx] += 1;
                 __threadfence();
-                // printf("Incremented counters[%d] = %d\n", msg.counter_idx, counters[msg.counter_idx]);
 
                 // Release lock
                 atomicExch(&locks[msg.counter_idx], 0);
-                // printf("Released lock on counter_idx %d\n", msg.counter_idx);
             }
 
+            // Exit when all messages have been processed
             if (sent >= num_threads && isEmpty(my_buf)) {
+                if (threadIdx.x == 0) {
+                    printf("Server %d exiting. Processed %d/%d operations\n", 
+                          blockIdx.x, sent, num_threads);
+                }
                 break;
             }
         }
-
     } else {
-        // do client stuff
-        // calculate target server
-        if (tid < (num_server_blocks * blockDim.x + num_threads)) {
-            int counter = tid % num_counters;
-            int target_server = counter % num_server_blocks;
-            // send message to server
-            send_msg(target_server, counter, bufs, done);
-            // atomicAdd(done, 1);
-            // printf("DONE: %d\n", atomicAdd(done, 1));
+        // Client code: each thread sends exactly one message
+        // We want exactly num_threads client threads to send messages
+        int client_tid = tid - (num_server_blocks * blockDim.x);
+        
+        if (client_tid < num_threads) {
+            // Each thread is responsible for one message only
+            // We use client_tid as a unique client ID, and map it to a counter
+            int counter_idx = client_tid % num_counters;
+            int target_server = counter_idx % num_server_blocks;
+            
+            // Send one message per thread
+            send_msg(target_server, counter_idx, bufs, done);
+            
+            if (threadIdx.x == 0 && blockIdx.x == num_server_blocks) {
+                printf("Client block %d started sending messages\n", blockIdx.x);
+            }
         }
     }
 

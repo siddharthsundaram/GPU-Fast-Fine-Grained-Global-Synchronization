@@ -1,5 +1,8 @@
 #include "main.cuh"
 #include "arg_parser.h"
+#include <cuda_runtime.h>
+#include <algorithm> // For std::min
+#include <stdio.h>
 
 #define CHECK(call)                                                            \
     {                                                                          \
@@ -92,11 +95,20 @@ void gpu_buffer(int size, int num_servers, int num_clients) {
 
     dim3 block_size (std::min(num_clients, 256));
     dim3 grid_size ((num_clients + block_size.x - 1) / block_size.x + num_servers);
+    printf("NUM COUNTERS: %i\n", size);
     printf("NUM CLIENTS: %i\n", num_clients);
-    printf("BLOCK SIZE: %i\n", block_size);
-    printf("GRID SIZE: %i\n", grid_size); 
-    int shared_mem_size = num_servers * size * sizeof(int); 
-    counters_client_and_server_entry<<<4, 1024, shared_mem_size>>>(d_shared_data, size, num_servers, d_bufs, d_done, num_clients);
+    printf("BLOCK SIZE: %i\n", block_size.x);
+    printf("GRID SIZE: %i\n", grid_size.x); 
+    
+    // Calculate operations per thread
+    int operations_per_thread = std::max(1, size / num_clients);
+    printf("OPERATIONS PER THREAD: %i\n", operations_per_thread);
+    printf("TOTAL EXPECTED OPERATIONS: %i\n", operations_per_thread * num_clients);
+    
+    // Fix the shared memory allocation - it only needs to be large enough for the locks
+    int shared_mem_size = size * sizeof(int); 
+    counters_client_and_server_entry<<<grid_size, block_size, shared_mem_size>>>(
+        d_shared_data, size, num_servers, d_bufs, d_done, num_clients);
 
     CHECK(cudaDeviceSynchronize());
     
