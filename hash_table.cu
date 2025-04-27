@@ -14,7 +14,7 @@ namespace bpo = boost::program_options;
     }
 
 // Default hash table parameters
-#define HT_SIZE 1024                
+#define HT_SIZE 16384             
 #define MAX_LIST_NODES 10000000     
 #define BLOCK_SIZE 256              
 
@@ -84,7 +84,7 @@ double run_sequential_benchmark(int pool_size) {
     
     HashTable* table = create_hash_table(HT_SIZE);
     
-    // Create pool of elements for threads to randomly select from
+    // Create pool of elements to randomly select from
     int* element_pool = (int*)malloc(sizeof(int) * pool_size);
     for (int i = 0; i < pool_size; i++) {
         element_pool[i] = rand();
@@ -158,7 +158,7 @@ __device__ void process_hash_table_msg(Message* msg, GPUHashTable* ht, int* lock
 // Modified server kernel for hash table operations
 __global__ void hash_table_server_kernel(int* counters, int num_counters, int num_server_blocks, 
                                         Buffer* bufs, int* done, int num_threads,
-                                        GPUHashTable* hash_table) {
+                                        GPUHashTable* hash_table, int* random_elements) {
     bool is_server = blockIdx.x < num_server_blocks;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -219,8 +219,9 @@ __global__ void hash_table_server_kernel(int* counters, int num_counters, int nu
         
         // Only threads within the pool size range participate
         if (client_tid < num_threads) {
-            // Generate hash bucket based on the client thread ID
-            int counter = client_tid % num_counters;
+            // Use the pre-generated random element for this thread
+            int element = random_elements[client_tid];
+            int counter = element % num_counters;
             int target_server = counter % num_server_blocks;
             
             // Send exactly one message per client thread
@@ -271,18 +272,28 @@ double run_cuda_benchmark(int pool_size, int num_servers, int num_clients) {
     Buffer* d_bufs;
     int* d_done;
     int* d_shared_data;
+    int* d_random_elements;
     
     CHECK(cudaMalloc(&d_shared_data, HT_SIZE * sizeof(int)));
     CHECK(cudaMemset(d_shared_data, 0, HT_SIZE * sizeof(int)));
     CHECK(cudaMalloc(&d_done, sizeof(int)));
     CHECK(cudaMemset(d_done, 0, sizeof(int)));
     CHECK(cudaMalloc(&d_bufs, num_servers * sizeof(Buffer)));
+    CHECK(cudaMalloc(&d_random_elements, num_clients * sizeof(int)));
     
     // Initialize buffers on host and copy to device
     Buffer* h_bufs = (Buffer*)malloc(num_servers * sizeof(Buffer));
     memset(h_bufs, 0, num_servers * sizeof(Buffer));
     CHECK(cudaMemcpy(d_bufs, h_bufs, num_servers * sizeof(Buffer), cudaMemcpyHostToDevice));
     free(h_bufs);
+    
+    // Generate random elements for clients
+    int* h_random_elements = (int*)malloc(num_clients * sizeof(int));
+    for (int i = 0; i < num_clients; i++) {
+        h_random_elements[i] = rand();
+    }
+    CHECK(cudaMemcpy(d_random_elements, h_random_elements, num_clients * sizeof(int), cudaMemcpyHostToDevice));
+    free(h_random_elements);
     
     // Start timer
     printf("Launching kernel with %d server blocks and %d client threads...\n", 
@@ -300,7 +311,7 @@ double run_cuda_benchmark(int pool_size, int num_servers, int num_clients) {
     
     hash_table_server_kernel<<<grid_size, block_size, shared_mem_size>>>(
         d_shared_data, HT_SIZE, num_servers, d_bufs, d_done, 
-        num_clients, d_table);
+        num_clients, d_table, d_random_elements);
     
     // Wait for kernel to complete with timeout
     cudaError_t error = cudaSuccess;
@@ -342,6 +353,7 @@ double run_cuda_benchmark(int pool_size, int num_servers, int num_clients) {
     CHECK(cudaFree(d_bufs));
     CHECK(cudaFree(d_done));
     CHECK(cudaFree(d_shared_data));
+    CHECK(cudaFree(d_random_elements));
     
     return elapsed_time;
 }
