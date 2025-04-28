@@ -35,6 +35,7 @@ To test the hash table benchmark, edit the command line arguments in the Makefil
 `make hash_table_all`
 
 ### EM-GMM
+To see background and specific build instructions for this benchmark, see `em_gmm/README.md`.
 
 ## References
 Kai Wang, Don Fussell, and Calvin Lin. “Fast Fine-Grained Global Syn-
