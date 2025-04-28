@@ -1,5 +1,5 @@
 
-# GPU-Fast-Fine-Grained-Global-Synchronization
+# GPU Fast Fine Grained Global Synchronization
 
 ## Overview
 An implementation of fast, fine-grained global synchronization between threads on a GPU based on a paper by Wang et al. (2019)
