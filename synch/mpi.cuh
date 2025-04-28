@@ -73,10 +73,10 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
             // Exit when all messages have been processed AND buffer is empty for a while
             // This ensures we don't exit too early when messages might still be in transit
             if (sent >= num_threads && (isEmpty(my_buf) || empty_iterations > MAX_EMPTY_ITERATIONS)) {
-                if (threadIdx.x == 0) {
-                    printf("Server %d exiting. Processed %d/%d operations\n", 
-                          blockIdx.x, sent, num_threads);
-                }
+                // if (threadIdx.x == 0) {
+                //     printf("Server %d exiting. Processed %d/%d operations\n", 
+                //           blockIdx.x, sent, num_threads);
+                // }
                 break;
             }
             
@@ -102,9 +102,9 @@ __global__ void counters_client_and_server_entry(int *counters, int num_counters
             // Send one message per thread
             send_msg(target_server, counter_idx, bufs, done);
             
-            if (threadIdx.x == 0 && blockIdx.x == num_server_blocks) {
-                printf("Client block %d started sending messages\n", blockIdx.x);
-            }
+            // if (threadIdx.x == 0 && blockIdx.x == num_server_blocks) {
+            //     printf("Client block %d started sending messages\n", blockIdx.x);
+            // }
         }
     }
 
