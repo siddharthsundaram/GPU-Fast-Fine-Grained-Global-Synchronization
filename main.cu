@@ -1,4 +1,4 @@
-#include "main.h"
+#include "main.cuh"
 #include "arg_parser.h"
 #include <chrono>
 
