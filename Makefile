@@ -42,28 +42,28 @@ hash_table_test:
 
 # Additional benchmark targets for different collision factors
 hash_table_256:
-	./$(HASH_TABLE_EXE) --cf 256 --servers 4
+	./$(HASH_TABLE_EXE) --cf 256 --servers 4 --basic-gpu
 
 hash_table_1k:
-	./$(HASH_TABLE_EXE) --cf 1024 --servers 4
+	./$(HASH_TABLE_EXE) --cf 1024 --servers 4 --basic-gpu
 
 hash_table_32k:
-	./$(HASH_TABLE_EXE) --cf 32768 --servers 4
+	./$(HASH_TABLE_EXE) --cf 32768 --servers 4 --basic-gpu
 
 hash_table_128k:
-	./$(HASH_TABLE_EXE) --cf 131072 --servers 4
+	./$(HASH_TABLE_EXE) --cf 131072 --servers 4 --basic-gpu
 
 # Run all collision factor benchmarks sequentially
 hash_table_all: $(HASH_TABLE_EXE)
 	@echo "Running all hash table benchmarks..."
 	@echo "CF=256:"
-	@./$(HASH_TABLE_EXE) --cf 256 --servers 4
+	@./$(HASH_TABLE_EXE) --cf 256 --servers 4 --basic-gpu
 	@echo "\nCF=1024:"
-	@./$(HASH_TABLE_EXE) --cf 1024 --servers 4
+	@./$(HASH_TABLE_EXE) --cf 1024 --servers 4 --basic-gpu
 	@echo "\nCF=32768:"
-	@./$(HASH_TABLE_EXE) --cf 32768 --servers 4
+	@./$(HASH_TABLE_EXE) --cf 32768 --servers 4 --basic-gpu
 	@echo "\nCF=131072:"
-	@./$(HASH_TABLE_EXE) --cf 131072 --servers 4
+	@./$(HASH_TABLE_EXE) --cf 131072 --servers 4 --basic-gpu
 	@echo "\nBenchmark complete."
 
 clean:
