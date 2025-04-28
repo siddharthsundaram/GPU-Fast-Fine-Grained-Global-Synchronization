@@ -40,5 +40,4 @@ To test the hash table benchmark, edit the command line arguments in the Makefil
 Kai Wang, Don Fussell, and Calvin Lin. “Fast Fine-Grained Global Syn-
 chronization on GPUs”. In: Proceedings of the Twenty-Fourth International
 Conference on Architectural Support for Programming Languages and Op-
-erating Systems (ASPLOS). Apr. 2019, pp. 793–806. url: https://www.
-cs.utexas.edu/~lin/papers/asplos19.pdf.
+erating Systems (ASPLOS). Apr. 2019, pp. 793–806. url: https://www.cs.utexas.edu/~lin/papers/asplos19.pdf.
